@@ -2962,62 +2962,15 @@ img, video { max-width: 100%; height: auto; }
       // (getProductBaseName) แต่เอาเฉพาะ 2 วิธีที่มั่นใจสูง — ชื่อคล้ายกันตามรูปแบบไซส์/สี/หน่วยที่รู้จัก
       // และรูปภาพเดียวกันเป๊ะ — ไม่เอา fallback แบบคำนำหน้าคล้ายกัน (fuzzy) ที่หน้าตั้งค่าติดป้าย
       // "ตรวจสอบก่อนรวม" ไว้ เพราะพลาดแล้วกระทบการขายจริงตรงๆ ต่างจากหน้าตั้งค่าที่แค่เป็นคำแนะนำ
+      // FEATURE DISABLED (per user request): this used to merge same-name/same-image products
+      // into a single "grouped" card on the sales grid only (never touching the real records),
+      // which made the sales-grid product count (fewer cards) not match the raw count on the
+      // product table page — and the grouping itself was mis-clustering unrelated products
+      // together. Short-circuiting here shows every product as its own card, so both pages now
+      // always show the same count. clusterForDisplay is left in place (unused) rather than
+      // deleted in case grouping is wanted back later.
       function clusterForDisplay(products) {
-        const standalone = products.filter(p => (p.variants || []).length === 1);
-        const clustered = new Set();
-        const virtualGroups = [];
-
-        const byName = {};
-        standalone.forEach(p => {
-          const base = getProductBaseName(p.name);
-          if (base.length > 1) (byName[base] = byName[base] || []).push(p);
-        });
-        Object.entries(byName).forEach(([base, items]) => {
-          if (items.length < 2) return;
-          items.forEach(p => clustered.add(p.id));
-          virtualGroups.push({ label: base, items });
-        });
-
-        const byImage = {};
-        standalone.filter(p => !clustered.has(p.id)).forEach(p => {
-          const url = p.imageUrl;
-          if (url && /^(https?:|data:)/.test(url)) (byImage[url] = byImage[url] || []).push(p);
-        });
-        Object.values(byImage).forEach(items => {
-          if (items.length < 2) return;
-          items.forEach(p => clustered.add(p.id));
-          virtualGroups.push({ label: getProductBaseName(items[0].name) || items[0].name, items });
-        });
-
-        if (!virtualGroups.length) return products; // ทางลัด — ไม่มีอะไรให้จัดกลุ่มเพิ่ม
-
-        const idToVirtualCard = new Map();
-        virtualGroups.forEach(g => {
-          const card = {
-            __virtual: true,
-            id: 'vg-' + g.items.map(p => p.id).join('-'),
-            name: g.label,
-            imageUrl: g.items.find(p => p.imageUrl)?.imageUrl || null,
-            image: g.items.find(p => p.image)?.image || null,
-            variants: g.items.flatMap(p => p.variants || []),
-            _memberIds: g.items.map(p => p.id)
-          };
-          g.items.forEach(p => idToVirtualCard.set(p.id, card));
-        });
-
-        // คงลำดับเดิมของผลลัพธ์ไว้ (สำคัญตอนค้นหา — รายการที่ตรงสุดต้องขึ้นก่อนเหมือนเดิม ไม่ใช่ถูก
-        // ดันไปท้ายแถวเพราะถูกจัดกลุ่ม) โดยแทรกการ์ดกลุ่มเสมือน ณ ตำแหน่งของสมาชิกตัวแรกที่เจอ
-        const out = [];
-        const emitted = new Set();
-        products.forEach(p => {
-          const vcard = idToVirtualCard.get(p.id);
-          if (vcard) {
-            if (!emitted.has(vcard.id)) { out.push(vcard); emitted.add(vcard.id); }
-            return;
-          }
-          out.push(p);
-        });
-        return out;
+        return products;
       }
 
       window.renderProductGridResults = function(products, title) {
