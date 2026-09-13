@@ -1710,24 +1710,6 @@ img, video { max-width: 100%; height: auto; }
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <script>
-      // ==========================================
-      // MASTER APPLICATION LOGIC & STATE
-      // ==========================================
-      // BUG FIX (money-rounding, application-wide): every monetary calculation in this file
-      // (cart subtotal/discount/tax/grand total, change, refunds, reports, cloud sync — 49
-      // call sites) already funnels through this one function as its final rounding step, so
-      // fixing the rounding math itself closes the whole floating-point-rounding defect class
-      // at once, without migrating every stored/calculated value to a different unit (integer
-      // cents) — a much larger, riskier change touching the SQL schema and every sync path too.
-      // The OLD `Math.round(num*100)/100` has a textbook float-precision bug: the intermediate
-      // multiplication can itself already be wrong in binary floating point — e.g. in real
-      // JS, `1.005*100 === 100.49999999999999`, not 100.5 — so Math.round then silently rounds
-      // the wrong way for specific values (1.005 rounded to 1.00 instead of 1.01). Shifting the
-      // decimal point via a string exponent (`+'e2'` / `+'e-2'`) instead routes through JS's own
-      // exact decimal-string-to-number parsing rather than a binary multiply, which avoids that
-      // intermediate error entirely — this is the standard, well-established fix for this exact
-      // class of bug. Verified against known problem values (1.005, 1.015, 1.025, 0.145, etc.)
-      // before applying.
       const roundAmt = (num) => {
         const n = parseFloat(num) || 0;
         return Number(Math.round(Number(n + 'e2')) + 'e-2');
@@ -1767,24 +1749,75 @@ img, video { max-width: 100%; height: auto; }
         return h >>> 0;
       }
 
-      // BUG FIX: เวอร์ชันเดิมปั้น UUID 128 บิตจาก hash 32 บิตตัวเดียวแล้ว XOR กับค่าคงที่ 3 ค่า
-      // — เอนโทรปีจริงมีแค่ 32 บิต ไม่ใช่ 128 บิต ทำให้โอกาสสองรหัสในเครื่อง (สินค้า/บิล/ลูกค้า ฯลฯ)
-      // แปลงแล้วชนกันเริ่มมีนัยสำคัญตั้งแต่ประมาณ 65,000 รายการ (birthday paradox) และ upsert
-      // ฝั่ง Supabase จะ "เขียนทับ" เรคคอร์ดที่ชนกันแบบเงียบๆ โดยไม่มี error ให้เห็นเลย
-      // เวอร์ชันนี้รัน FNV-1a 4 รอบด้วย seed และ salt ต่างกันในแต่ละรอบ ให้ได้เอนโทรปีอิสระ
-      // ครบทั้ง 128 บิตจริง โดยยังคง sync และ deterministic เหมือนเดิม (string เดิมแปลงแล้วได้
-      // uuid เดิมเสมอ ซึ่งจำเป็นสำหรับ upsert ให้ตรงแถวเดิมทุกครั้งที่ sync ซ้ำ) — ไม่ต้องแก้จุดที่
-      // เรียกใช้ toUUID() เลยสักจุดเดียว
+      function sha1Words(bytes) {
+        const ml = bytes.length * 8;
+        const msg = bytes.slice();
+        msg.push(0x80);
+        while (msg.length % 64 !== 56) msg.push(0);
+        for (let i = 7; i >= 0; i--) msg.push(Math.floor(ml / Math.pow(2, 8 * i)) & 0xff);
+
+        const rotl = (n, s) => ((n << s) | (n >>> (32 - s))) >>> 0;
+        let h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
+
+        for (let chunk = 0; chunk < msg.length; chunk += 64) {
+          const w = new Array(80);
+          for (let i = 0; i < 16; i++) {
+            w[i] = ((msg[chunk + i * 4] << 24) | (msg[chunk + i * 4 + 1] << 16) |
+                    (msg[chunk + i * 4 + 2] << 8) | msg[chunk + i * 4 + 3]) >>> 0;
+          }
+          for (let i = 16; i < 80; i++) w[i] = rotl(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+
+          let a = h0, b = h1, c = h2, d = h3, e = h4;
+          for (let i = 0; i < 80; i++) {
+            let f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+            else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+            const temp = (rotl(a, 5) + f + e + k + w[i]) >>> 0;
+            e = d; d = c; c = rotl(b, 30); b = a; a = temp;
+          }
+          h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0;
+          h3 = (h3 + d) >>> 0; h4 = (h4 + e) >>> 0;
+        }
+        return [h0, h1, h2, h3, h4];
+      }
+
+      // Fixed, app-specific namespace UUID for the UUID v5 derivation below — any constant
+      // UUID works as a namespace (it just needs to never change, so the same input string
+      // keeps producing the same output UUID across every sync); this one is arbitrary and
+      // private to this app, not one of the RFC 4122 predefined namespaces.
+      const TOUUID_NAMESPACE = '6f0f7b8e-6e2a-4a2b-9b3c-6a1e2d9f0c11';
+
+      // ปั้น id string เดิมของแอป (เช่น "cat-172...", "p-abc123") ให้เป็น UUID จริงแบบ
+      // deterministic เพื่อส่งขึ้น Supabase (คอลัมน์ id เป็น uuid) โดยไม่ต้องเปลี่ยน id ที่ใช้ใน
+      // เครื่องเลย เดิมใช้ hash มือเขียน (FNV-1a) 4 รอบต่อกันเป็น 128 บิต ซึ่งแม้จะดีกว่า hash
+      // 32 บิตตัวเดียวมาก แต่ก็ยังไม่ใช่อัลกอริทึมมาตรฐานที่ผ่านการพิสูจน์คุณสมบัติการกระจายตัว
+      // แบบ cryptographic hash จริงๆ เปลี่ยนมาใช้ UUID v5 มาตรฐานตาม RFC 4122 จริง (namespace +
+      // SHA-1) แทน — เป็นสูตรมาตรฐานที่มีการวิเคราะห์ทางคณิตศาสตร์ยืนยันโอกาสชนกันแล้ว ยังคง
+      // sync และ deterministic เหมือนเดิมทุกประการ (string เดิมแปลงแล้วได้ uuid เดิมเสมอ) จึงไม่
+      // ต้องแก้จุดเรียกใช้ toUUID() แม้แต่จุดเดียว
       function toUUID(str) {
         if (!str) return null;
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (uuidRegex.test(str)) return str;
-        const h1 = fnv1a(str, 0x811c9dc5).toString(16).padStart(8, '0');
-        const h2 = fnv1a(str + '\u0001', 0x9e3779b9).toString(16).padStart(8, '0');
-        const h3 = fnv1a(str + '\u0002', 0x85ebca6b).toString(16).padStart(8, '0');
-        const h4 = fnv1a(str + '\u0003', 0xc2b2ae35).toString(16).padStart(8, '0');
-        const c = h1 + h2 + h3 + h4; // 32 hex chars รวม = 128 บิต เอนโทรปีอิสระจริง
-        return `${c.slice(0,8)}-${c.slice(8,12)}-4${c.slice(13,16)}-8${c.slice(17,20)}-${c.slice(20,32)}`;
+
+        const nsHex = TOUUID_NAMESPACE.replace(/-/g, '');
+        const nsBytes = [];
+        for (let i = 0; i < 32; i += 2) nsBytes.push(parseInt(nsHex.substr(i, 2), 16));
+        const nameBytes = Array.from(new TextEncoder().encode(str));
+
+        const words = sha1Words(nsBytes.concat(nameBytes));
+        const bytes = [];
+        for (let i = 0; i < 4; i++) { // first 128 bits (16 bytes) of the 160-bit SHA-1 digest
+          const w = words[i];
+          bytes.push((w >>> 24) & 0xff, (w >>> 16) & 0xff, (w >>> 8) & 0xff, w & 0xff);
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x50; // version 5
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+
+        const hex = bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
       }
 
       // PERF FIX (#8): เดิมพิมพ์ค้นหาในตารางสต็อกทีเดียวก็ re-render ทั้งตารางทันที ถ้าสินค้าเยอะ
@@ -1917,11 +1950,6 @@ img, video { max-width: 100%; height: auto; }
           if (publicUrl) {
             p.imageUrl = publicUrl;
           } else {
-            // BUG FIX: เดิม fallback เป็น URL.createObjectURL(file) ซึ่งเป็น blob: URL ที่ใช้ได้
-            // แค่ในแท็บ/เซสชันปัจจุบันเท่านั้น — พอ persist() ลง localStorage แล้วรีเฟรชหน้าเว็บ
-            // URL นี้จะใช้ไม่ได้ทันที รูปหายทุกครั้ง (ไม่สอดคล้องกับจุดถ่ายรูปสินค้าทีละชิ้นที่ใช้
-            // base64 data URL เป็น fallback แทน ซึ่งอยู่ข้ามการรีเฟรชได้ปกติ) เปลี่ยนมาใช้
-            // FileReader.readAsDataURL() แบบเดียวกันให้สอดคล้องกัน รูปจะไม่หายหลัง reload อีกต่อไป
             p.imageUrl = await new Promise((resolve) => {
               const reader = new FileReader();
               reader.onload = () => resolve(reader.result);
@@ -1938,6 +1966,17 @@ img, video { max-width: 100%; height: auto; }
         window.closeModal('modal-bulk-image');
         window.renderStockTable();
         window.renderSaleHome?.();
+
+        // เดิมหลังอัปโหลดรูปเสร็จ เรียกแค่ window.persist?.() ซึ่งบันทึกลง local storage ของ
+        // เครื่องนี้เท่านั้น — ไม่เคย push ค่า imageUrl ใหม่ขึ้น Supabase (คอลัมน์ products.image_url)
+        // เลย ทั้งที่ตัวไฟล์รูปถูกอัปโหลดขึ้น Storage สำเร็จไปแล้วจริง ผลคือถ้าไม่มีการกดปุ่ม sync
+        // แยกต่างหากทีหลัง เครื่องอื่น (หรือเปิดแอปใหม่หลังล้าง local storage) จะไม่เห็นรูปเลย เพราะ
+        // แถวสินค้าใน Supabase ยังไม่มี image_url ชี้ไปยังไฟล์ที่อัปโหลดไปแล้ว — เพิ่มการ sync
+        // ขึ้น Supabase ทันทีที่นี่ ให้ครบวงจรในตัวเอง ไม่ต้องพึ่งให้ผู้ใช้กดปุ่ม sync แยกเองอีกที
+        if (successCount > 0) {
+          window.syncProductsToSupabase?.(true);
+        }
+
         window.showAlert("นำเข้ารูปภาพเรียบร้อย", `จับคู่และอัปโหลดรูปภาพสำเร็จ ${successCount} รายการ จากทั้งหมด ${entries.length} รายการ`, false);
       };
 
@@ -2388,20 +2427,21 @@ img, video { max-width: 100%; height: auto; }
             if (fracErr) throw fracErr;
           }
 
-          // 6. Customers — this schema has no debt/accounts-receivable column at all (only
-          // credit_limit). Outstanding balance (db.customers[].debt) stays a LOCAL-only figure
-          // this device tracks itself; there is nothing to push it into server-side, so it is
-          // intentionally left out of this upsert rather than silently dropped into a
-          // similarly-named column that doesn't exist.
+          // 6. Customers — ยอดหนี้ (debt) เป็นค่าที่ Supabase ต้องเป็นแหล่งความจริงหลักเพียงที่
+          // เดียว: ทุกธุรกรรมที่เปลี่ยนยอดหนี้ (ขายเครดิต/คืนสินค้า/รับชำระหนี้) อัปเดตค่านี้บน
+          // Supabase แบบ atomic ผ่าน RPC โดยตรงอยู่แล้ว (create_sale, process_return,
+          // receive_customer_payment) การ sync รอบนี้จึงตั้งใจไม่ส่งคอลัมน์ debt ขึ้นไปด้วย —
+          // ถ้าส่งค่า local (ซึ่งอาจเก่ากว่าค่าบน Supabase ถ้าเครื่องอื่นเพิ่งขาย/รับชำระไป) ขึ้นไป
+          // upsert ทับ จะย้อนยอดหนี้ที่ถูกต้องบน Supabase กลับไปเป็นค่าเก่าโดยไม่ได้ตั้งใจ ลูกค้า
+          // ใหม่ที่ยังไม่เคยขึ้น Supabase จะได้ debt=0 จาก default ของคอลัมน์เอง (ตรงกับค่าเริ่มต้น
+          // ตอนสร้างลูกค้าใหม่ในเครื่องอยู่แล้ว) ส่วนขาลง (ดึงยอดหนี้จาก Supabase กลับมาเขียนทับ
+          // ค่าในเครื่อง) อยู่ใน loadDatabaseState ด้านล่าง
           const customerRows = Object.values(db.customers || {}).map(c => ({
             id: toUUID(c.id),
             name: c.name,
             phone: c.phone || null,
             address: c.address || '',
-            credit_limit: roundAmt(c.creditLimit || 0),
-            // เพิ่มขึ้นมาคู่กับ #6: ต้อง sync ยอดหนี้จริงขึ้นไปด้วย ไม่งั้น create_sale RPC ที่เพิ่ง
-            // เพิ่มการเช็ควงเงินเครดิตฝั่งเซิร์ฟเวอร์จะไม่มีข้อมูล debt ให้เทียบเลย
-            debt: roundAmt(c.debt || 0)
+            credit_limit: roundAmt(c.creditLimit || 0)
           }));
           if (customerRows.length > 0) {
             const { error: custErr } = await client.from('customers').upsert(customerRows, { onConflict: 'id' });
@@ -2482,9 +2522,6 @@ img, video { max-width: 100%; height: auto; }
               bill_number: b.id,
               customer_id: (b.customerId && b.customerId !== 'GENERAL') ? toUUID(b.customerId) : null,
               user_id: b.cashierId ? toUUID(b.cashierId) : null,
-              // BUG FIX: เดิมใช้ db.currentShift ของตอน sync รัน ทำให้บิลเก่าที่ค้างอยู่ (ออฟไลน์)
-              // ถูกผูกกับกะที่เปิดอยู่ ณ ตอนนั้นแทนที่จะเป็นกะตอนขายจริง — ใช้ b.shiftId ที่บันทึกไว้
-              // ตั้งแต่ตอนสร้างบิลแทน (บิลเก่าก่อนแก้ที่ไม่มี shiftId จะได้ null ซึ่งถูกต้องกว่าเดา)
               shift_id: b.shiftId ? toUUID(b.shiftId) : null,
               subtotal: roundAmt(b.total),
               discount_amount: 0,
@@ -2602,10 +2639,6 @@ img, video { max-width: 100%; height: auto; }
         if (overlay) overlay.classList.remove('hidden');
 
         try {
-          // BUG FIX: เดิมไม่เช็คค่าที่ return กลับมาเลย ต่อให้ syncProductsToSupabase/
-          // syncTransactionsToSupabase ล้มเหลวจริง (เช่นโดน RLS บล็อกเพราะยังไม่ได้ล็อกอิน) ก็ยัง
-          // ขึ้นโทสต์ "ซิงค์สำเร็จ" หลอกอยู่ดี ทำให้ไม่มีทางรู้เลยว่าทำไมตารางบน Supabase ว่างเปล่า
-          // เรียกซ้ำแบบไม่ quiet (isQuiet=false) เฉพาะตัวที่ล้มเหลว เพื่อให้ error จริงเด้งให้เห็น
           const res1 = await window.syncProductsToSupabase(true);
           const res2 = await window.syncTransactionsToSupabase(true);
 
@@ -2623,9 +2656,12 @@ img, video { max-width: 100%; height: auto; }
         }
       };
 
-      // ==========================================
-      // CART & BILL DISCOUNTS
-      // ==========================================
+      function getAvailableSellQty(variant, multiplier) {
+        const stock = +variant.stock || 0;
+        const m = +multiplier || 1;
+        return m > 0 ? stock / m : Infinity;
+      }
+
       window.addUnifiedToCart = function(productId, variantId, fractionId, evt) {
         const p = db.products[productId];
         if (!p) return;
@@ -2647,6 +2683,14 @@ img, video { max-width: 100%; height: auto; }
 
         const cartKey = `${productId}_${variantId}_${fractionId || 'main'}`;
         const existing = cart.find(x => x.cartKey === cartKey);
+        const qtyAlreadyInCart = existing ? existing.qty : 0;
+        const available = getAvailableSellQty(v, multiplier);
+
+        if (roundStock(qtyAlreadyInCart + 1 - available) > 0) {
+          return window.showAlert
+            ? window.showAlert('สินค้าไม่พอ', `"${p.name} (${v.sizeName})" คงเหลือให้ขายได้อีก ${roundStock(available - qtyAlreadyInCart)} หน่วยเท่านั้น`, true)
+            : window.showToast?.('สินค้าคงเหลือไม่พอ');
+        }
 
         if (existing) {
           existing.qty += 1;
@@ -2738,18 +2782,6 @@ img, video { max-width: 100%; height: auto; }
             </div>`;
         }
 
-        // Group card: one photo/name, badge shows how many sizes/colors, tap opens the picker.
-        // p.__virtual = จัดกลุ่มแค่ตอนแสดงผล (สินค้ายังแยกเรคคอร์ดกันจริงในฐานข้อมูล — ดู
-        // clusterForDisplay) ต้องเปิด picker คนละฟังก์ชันกับกลุ่มที่รวมจริงแล้ว เพราะ p.id ของการ์ด
-        // เสมือนนี้ไม่มีอยู่จริงใน db.products
-        // BUG FIX: JSON.stringify(...) always wraps output in literal double quotes. That was
-        // being dropped straight into onclick="${openPicker}" below, which is ALSO a
-        // double-quoted attribute — so the browser's HTML parser cut the attribute off at the
-        // very first quote inside the JSON array/string instead of at the end of the handler,
-        // producing a truncated onclick and "SyntaxError: Unexpected token '}'" the moment this
-        // card (or its button) tried to run — this is the "2 แบบ" grouped-product card bug.
-        // escapeHTML() here makes it safe regardless of array contents: the browser decodes the
-        // escaped quotes back to real " when it compiles the handler.
         const openPicker = escapeHTML(p.__virtual
           ? `window.openVirtualGroupPicker(${JSON.stringify(p._memberIds)})`
           : `window.openVariantPicker('${p.id}')`);
@@ -2871,10 +2903,6 @@ img, video { max-width: 100%; height: auto; }
       window.changeProductGridCols = function(val) {
         const cols = Math.max(1, parseInt(val) || 4);
         const grid = document.getElementById('product-grid');
-        // BUG FIX: เดิม Math.min(cols, 2) ล็อกจำนวนคอลัมน์พื้นฐาน (มือถือ/จอแคบกว่า md=768px)
-        // ไว้ที่ 2 เสมอ ไม่ว่าจะเลือกกี่คอลัมน์ก็ตาม ทำให้บนมือถือ/แท็บเล็ตจอแคบกดเลือก
-        // "6 คอลัมน์" แล้วไม่มีอะไรเกิดขึ้นเลย เพราะ class md:grid-cols-6 ยังไม่ทำงานที่ความกว้าง
-        // นั้น — ผู้ใช้เลือกเองแล้วต้องเห็นผลทันทีทุกขนาดจอ ไม่ควรมี breakpoint มาทับ
         if (grid) grid.className = `grid gap-3 grid-cols-${cols}`;
         try { localStorage.setItem('pos_products_grid_cols', cols); } catch (e) {}
       };
@@ -2903,10 +2931,6 @@ img, video { max-width: 100%; height: auto; }
         if (!bar) return;
         const cats = Array.isArray(db.categories) ? db.categories : [];
         const topLevel = cats.filter(c => !c.parentId);
-        // BUG FIX: onclick is often built with JSON.stringify(...) by callers (e.g. the
-        // category pills below), which always produces literal double quotes — escaping here
-        // once protects every pill() button regardless of what the caller passes in, instead of
-        // needing every call site to remember to escape itself.
         const pill = (label, icon, isActive, onclick, extraCls) => `
           <button onclick="${escapeHTML(onclick)}" class="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-bold btn-touch transition-colors ${isActive ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white border text-slate-600 hover:border-indigo-300'} ${extraCls || ''}">
             <span>${icon}</span><span>${label}</span>
@@ -2962,15 +2986,62 @@ img, video { max-width: 100%; height: auto; }
       // (getProductBaseName) แต่เอาเฉพาะ 2 วิธีที่มั่นใจสูง — ชื่อคล้ายกันตามรูปแบบไซส์/สี/หน่วยที่รู้จัก
       // และรูปภาพเดียวกันเป๊ะ — ไม่เอา fallback แบบคำนำหน้าคล้ายกัน (fuzzy) ที่หน้าตั้งค่าติดป้าย
       // "ตรวจสอบก่อนรวม" ไว้ เพราะพลาดแล้วกระทบการขายจริงตรงๆ ต่างจากหน้าตั้งค่าที่แค่เป็นคำแนะนำ
-      // FEATURE DISABLED (per user request): this used to merge same-name/same-image products
-      // into a single "grouped" card on the sales grid only (never touching the real records),
-      // which made the sales-grid product count (fewer cards) not match the raw count on the
-      // product table page — and the grouping itself was mis-clustering unrelated products
-      // together. Short-circuiting here shows every product as its own card, so both pages now
-      // always show the same count. clusterForDisplay is left in place (unused) rather than
-      // deleted in case grouping is wanted back later.
       function clusterForDisplay(products) {
-        return products;
+        const standalone = products.filter(p => (p.variants || []).length === 1);
+        const clustered = new Set();
+        const virtualGroups = [];
+
+        const byName = {};
+        standalone.forEach(p => {
+          const base = getProductBaseName(p.name);
+          if (base.length > 1) (byName[base] = byName[base] || []).push(p);
+        });
+        Object.entries(byName).forEach(([base, items]) => {
+          if (items.length < 2) return;
+          items.forEach(p => clustered.add(p.id));
+          virtualGroups.push({ label: base, items });
+        });
+
+        const byImage = {};
+        standalone.filter(p => !clustered.has(p.id)).forEach(p => {
+          const url = p.imageUrl;
+          if (url && /^(https?:|data:)/.test(url)) (byImage[url] = byImage[url] || []).push(p);
+        });
+        Object.values(byImage).forEach(items => {
+          if (items.length < 2) return;
+          items.forEach(p => clustered.add(p.id));
+          virtualGroups.push({ label: getProductBaseName(items[0].name) || items[0].name, items });
+        });
+
+        if (!virtualGroups.length) return products; // ทางลัด — ไม่มีอะไรให้จัดกลุ่มเพิ่ม
+
+        const idToVirtualCard = new Map();
+        virtualGroups.forEach(g => {
+          const card = {
+            __virtual: true,
+            id: 'vg-' + g.items.map(p => p.id).join('-'),
+            name: g.label,
+            imageUrl: g.items.find(p => p.imageUrl)?.imageUrl || null,
+            image: g.items.find(p => p.image)?.image || null,
+            variants: g.items.flatMap(p => p.variants || []),
+            _memberIds: g.items.map(p => p.id)
+          };
+          g.items.forEach(p => idToVirtualCard.set(p.id, card));
+        });
+
+        // คงลำดับเดิมของผลลัพธ์ไว้ (สำคัญตอนค้นหา — รายการที่ตรงสุดต้องขึ้นก่อนเหมือนเดิม ไม่ใช่ถูก
+        // ดันไปท้ายแถวเพราะถูกจัดกลุ่ม) โดยแทรกการ์ดกลุ่มเสมือน ณ ตำแหน่งของสมาชิกตัวแรกที่เจอ
+        const out = [];
+        const emitted = new Set();
+        products.forEach(p => {
+          const vcard = idToVirtualCard.get(p.id);
+          if (vcard) {
+            if (!emitted.has(vcard.id)) { out.push(vcard); emitted.add(vcard.id); }
+            return;
+          }
+          out.push(p);
+        });
+        return out;
       }
 
       window.renderProductGridResults = function(products, title) {
@@ -3068,6 +3139,21 @@ img, video { max-width: 100%; height: auto; }
       window.updateCartQty = function(key, change) {
         const item = cart.find(x => x.cartKey === key);
         if (!item) return;
+
+        if (change > 0) {
+          const p = db.products[item.id];
+          const v = p?.variants.find(x => x.id === item.variantId);
+          if (v) {
+            const available = getAvailableSellQty(v, item.multiplier);
+            if (roundStock(item.qty + change - available) > 0) {
+              window.showAlert
+                ? window.showAlert('สินค้าไม่พอ', `คงเหลือให้ขายได้อีก ${roundStock(available)} หน่วยเท่านั้น`, true)
+                : window.showToast?.('สินค้าคงเหลือไม่พอ');
+              return;
+            }
+          }
+        }
+
         item.qty += change;
         if (item.qty <= 0) {
           cart = cart.filter(x => x.cartKey !== key);
@@ -3161,9 +3247,6 @@ img, video { max-width: 100%; height: auto; }
         window.updateCartUI();
       };
 
-      // BUG FIX: called from loadDatabaseState() via optional chaining but never defined —
-      // silently no-op'd, so the cart's customer dropdown never reflected customers freshly
-      // pulled from Supabase until the cart happened to be reopened (which repopulates it itself).
       window.populateCustomerSelect = function() {
         const custSelect = document.getElementById('pay-customer-select');
         if (custSelect) {
@@ -3260,6 +3343,18 @@ img, video { max-width: 100%; height: auto; }
           return alert("กรณีค้างชำระ จำเป็นต้องเลือกชื่อลูกค้าก่อนบันทึก");
         }
 
+        for (const item of cart) {
+          const p = db.products[item.id];
+          const v = p?.variants.find(x => x.id === item.variantId);
+          if (!v) continue;
+          const available = getAvailableSellQty(v, item.multiplier);
+          if (roundStock(item.qty - available) > 0) {
+            return window.showAlert
+              ? window.showAlert('สินค้าไม่พอ', `"${item.name}" คงเหลือให้ขายได้อีก ${roundStock(available)} หน่วยเท่านั้น กรุณาแก้จำนวนในตะกร้า`, true)
+              : alert(`สินค้าคงเหลือไม่พอ: ${item.name}`);
+          }
+        }
+
         // Credit-limit check — this schema's create_sale RPC does not enforce credit_limit
         // itself (it only carries the column), so this client-side check is the only
         // enforcement there is; per the manual's "ตรวจสอบวงเงินเครดิต" description, previously
@@ -3285,9 +3380,6 @@ img, video { max-width: 100%; height: auto; }
           customerId: cid,
           cashierId: db.activeUser?.id || null,
           cashierName: db.activeUser?.name || null,
-          // BUG FIX: เดิมบิลไม่เก็บว่าขายตอนกะไหน ทำให้โค้ด sync ต้องเดาโดยอ่าน db.currentShift
-          // ณ เวลาที่ sync รัน (ซึ่งอาจเป็นกะใหม่ไปแล้ว หรือร้านปิดไปแล้วก็ได้ null) เก็บตรงนี้
-          // ทันทีตอนขาย ให้เป็น source of truth เดียวสำหรับทุกจุดที่ sync ขึ้น Supabase
           shiftId: db.currentShift?.id || null
         };
 
@@ -3358,8 +3450,6 @@ img, video { max-width: 100%; height: auto; }
             p_bill_number: bill.id,
             p_customer_id: (bill.customerId && bill.customerId !== 'GENERAL') ? toUUID(bill.customerId) : null,
             p_user_id: bill.cashierId ? toUUID(bill.cashierId) : null,
-            // BUG FIX: ใช้ shift ของบิลเอง (เก็บไว้ตอนสร้างบิล) แทน db.currentShift ปัจจุบัน —
-            // กันบิลที่ค้าง sync ข้ามกะ/ข้ามวันไปถูกผูกกับกะผิด
             p_shift_id: bill.shiftId ? toUUID(bill.shiftId) : null,
             p_discount_amount: 0,
             p_tax_amount: 0,
@@ -3822,11 +3912,6 @@ img, video { max-width: 100%; height: auto; }
         if (ids.length < 2) return false;
         const target = db.products[ids[0]];
         if (!target) return false;
-        // BUG FIX: merging used to just `delete db.products[srcId]` locally with no
-        // corresponding delete on Supabase — the merged-away product rows (and their
-        // product_variants/product_categories junction rows) were left orphaned in the
-        // cloud database forever, since upsert() never removes rows that stop appearing
-        // locally. Now mirrors the same best-effort cloud delete window.deleteProduct() uses.
         const mergedAwayIds = [];
         ids.slice(1).forEach(srcId => {
           const src = db.products[srcId];
@@ -3842,13 +3927,6 @@ img, video { max-width: 100%; height: auto; }
         target.name = groupName;
         window.persist?.();
         (async () => {
-          // BUG FIX: sb() was never defined in this script block — it only exists inside a
-          // separate, later <script> tag's own closure (a different scope entirely), so calling
-          // it here always threw "Can't find variable: sb" the moment a merge ran (caught as an
-          // unhandled promise rejection since this is inside an async IIFE) — that's the
-          // "รวมกลุ่มนี้" button in the group-suggestions screen. window.getSupabaseClient is the
-          // actual global accessor (defined earlier in this same block) — using it directly
-          // avoids depending on a helper that isn't in scope here.
           const c = window.getSupabaseClient?.();
           if (!c) return;
           for (const id of mergedAwayIds) {
@@ -4018,15 +4096,6 @@ img, video { max-width: 100%; height: auto; }
         window.suggestProductGroups(); // refresh the list — this group is now merged and gone
       };
 
-      // ==========================================
-      // GOODS RECEIPT & MASTER SETTINGS
-      // ==========================================
-      // BUG FIX / UX: this used to be a plain <select> listing every product as a flat
-      // alphabetical dropdown — fine for a handful of items, unusable once the catalog grows,
-      // since finding one SKU meant scrolling through the entire list. Replaced with a
-      // type-to-search picker (matches name / SKU / barcode) that shows the product photo and
-      // current stock right in the results, so the right item can be found in a couple of
-      // keystrokes even without knowing exactly which category it's filed under.
       window.onPOProductChange = function() {
         const pid = document.getElementById('po-product-picker-value').value;
         const p = db.products[pid];
@@ -4224,13 +4293,6 @@ img, video { max-width: 100%; height: auto; }
         document.getElementById('po-item-cost').value = '';
       };
 
-      // Populates the supplier dropdown and clears/resets the product search picker so it's
-      // ready to search fresh (e.g. after the product catalog changes elsewhere).
-      // BUG FIX: this function was called from three places (showView, saveSupplier,
-      // saveProduct/deleteProduct) via `window.populatePOPickers?.()` and `window.renderPOPicker?.()`
-      // but neither was ever actually defined anywhere — the supplier select was silently,
-      // permanently empty, so a supplier could never be chosen and the whole "receive goods"
-      // feature was unusable no matter what confirmReceivePO() did.
       window.populatePOPickers = function() {
         const supSel = document.getElementById('po-supplier-select');
         if (supSel) {
@@ -4487,6 +4549,28 @@ img, video { max-width: 100%; height: auto; }
         window.closeModal('modal-receive-payment');
         window.renderSalesAR();
         window.showToast(`บันทึกรับชำระหนี้ ${formatMoney(amount)} เรียบร้อย`);
+
+        // เขียนยอดหนี้ที่ถูกต้องกลับขึ้น Supabase ทันทีผ่าน RPC (แหล่งความจริงหลักของ debt) แทนที่
+        // จะรอรอบ sync สินค้า/ลูกค้าแบบเต็ม ซึ่งไม่ส่ง debt ขึ้นไปแล้ว (ดูคอมเมนต์ที่ customerRows)
+        window.syncReceivePaymentToSupabaseRPC?.(cid, amount);
+      };
+
+      // Fire-and-forget: ส่งการรับชำระหนี้ขึ้น Supabase ผ่าน receive_customer_payment RPC
+      window.syncReceivePaymentToSupabaseRPC = async function(customerId, amount) {
+        const client = window.getSupabaseClient();
+        if (!client) return; // offline / not configured — local state remains the fallback
+        try {
+          const { error } = await client.rpc('receive_customer_payment', {
+            p_customer_id: toUUID(customerId),
+            p_amount: +amount || 0,
+            p_shift_id: db.currentShift?.id ? toUUID(db.currentShift.id) : null
+          });
+          if (error) throw error;
+          window.updateSupabaseBadge(true);
+        } catch (err) {
+          console.warn('RPC receive_customer_payment failed:', err);
+          window.updateSupabaseBadge(false);
+        }
       };
 
       // --- Return / refund workflow ---
@@ -4595,7 +4679,7 @@ img, video { max-width: 100%; height: auto; }
 
         let refundTotal = 0;
         let anyReturned = false;
-        const rpcItems = []; // BUG FIX (#1): เก็บไว้ส่งขึ้น process_return RPC ด้วย
+        const rpcItems = [];
 
         bill.items.forEach((item, idx) => {
           const el = document.getElementById(`return-qty-${idx}`);
@@ -4650,12 +4734,6 @@ img, video { max-width: 100%; height: auto; }
           ? `บันทึกใบลดหนี้ ${creditNoteNo} เรียบร้อย: หักยอดหนี้ ${formatMoney(refundTotal)}`
           : `บันทึกใบลดหนี้ ${creditNoteNo} เรียบร้อย: คืนเงิน ${formatMoney(refundTotal)}`);
 
-        // BUG FIX (#1): เดิมจบแค่ตรงนี้ — สถานะบิล/สต็อกที่คืนไม่เคยไปถึง Supabase เลยถ้าบิลนั้น
-        // เคย sync ผ่าน RPC ไปแล้ว (ติดธง _syncedViaRPC ถาวร) เรียก process_return แบบ
-        // fire-and-forget เหมือนแพทเทิร์นเดียวกับ syncBillToSupabaseRPC — ถ้าออฟไลน์/พลาด ข้อมูล
-        // ก็ยังถูกต้องในเครื่องเหมือนเดิม แค่รอ sync รอบถัดไปไม่ได้ (ไม่มี batch fallback สำหรับ
-        // การคืนสินค้าในตอนนี้ เพราะต้องรู้ bill server-side id ก่อน — ปล่อยให้กดซิงค์ใหม่ได้จาก
-        // ปุ่ม forceSyncNow ถ้าพลาดจริง)
         window.syncReturnToSupabaseRPC?.(bill, rpcItems, fullyReturned);
       };
 
@@ -4743,14 +4821,6 @@ img, video { max-width: 100%; height: auto; }
       window.addEventListener('DOMContentLoaded', () => {
         window.renderSaleHome?.();
         window.refreshAuthStatus?.();
-        // BUG FIX: syncCategoryBarOffset() used to only run on window 'resize', never on
-        // initial load — the category bar and pagination bar (both position:sticky, set via
-        // inline style.top computed here) never got a starting `top` value. Without it the two
-        // bars can end up stacked on top of each other at the same position, with the
-        // higher z-index category bar sitting over the pagination bar's ‹ › buttons and
-        // silently swallowing every tap on them ("ปุ่มเปลี่ยนหน้าไม่ทำงาน/ล็อก"). Running it once
-        // here (and again after every category/page render, below) keeps the offsets correct
-        // from the very first paint.
         setTimeout(() => window.syncCategoryBarOffset?.(), 0);
       });
     </script>
@@ -4798,15 +4868,6 @@ img, video { max-width: 100%; height: auto; }
     const r=fn(c.from(table)); if(r && typeof r.then==='function'){ const {data,error}=await r; if(error) throw error; return data; }
     return r;
   }
-  // BUG FIX: Supabase/PostgREST caps every request at 1000 rows by default (the server-side
-  // db.max_rows setting), no matter how large .select('*') asks for. A plain q() call used to
-  // silently truncate at row 1000 — stores with more than 1000 products (or variants/fractions/
-  // category links, which can outnumber products) would see the pull stop dead at exactly 1000
-  // even though 2000+ rows existed in the DB, with no error to explain why. Fixed by looping
-  // with .range() and accumulating pages until one comes back shorter than PAGE, which is the
-  // only reliable "no more rows left" signal — same pattern already used for the Storage
-  // .list() pagination fix above. Ordered by id for a stable sort across pages so no row is
-  // ever skipped or duplicated between page boundaries.
   async function qAll(table, fn){
     const c=sb(); if(!c) return null;
     const PAGE=1000;
@@ -4820,15 +4881,6 @@ img, video { max-width: 100%; height: auto; }
     }
     return rows;
   }
-  // BUG FIX: this used to run automatically on every page load (50ms after DOMContentLoaded)
-  // and would silently wipe out db.products with whatever Supabase returned — including an
-  // EMPTY catalog if this was the first-ever connection before anything had been pushed up yet.
-  // It also re-keyed every product/customer using Supabase's own row UUID instead of the
-  // original local id, which is what the cart, receipts, and bill history all still referred
-  // to — breaking those references on the very next reload. Pulling from the cloud is now an
-  // explicit action (Settings > ฐานข้อมูล Supabase > "ดึงข้อมูลจากคลาวด์"), and the merge below
-  // matches existing local products/customers by SKU/phone so their local id — and any
-  // in-progress local edits to stock — are preserved rather than overwritten.
   window.loadDatabaseState=async function(silent){
     const c=sb(); if(!c) return false;
     // Run each table fetch independently (allSettled, not all) so a problem with one table
@@ -4907,13 +4959,6 @@ img, video { max-width: 100%; height: auto; }
           const existing=db.products[existingId];
           existing.name=p.name;
           existing.cat=catsByProduct[p.id]||existing.cat;
-          // BUG FIX: this used to write the photo URL into `existing.image`, which is actually
-          // the EMOJI field (rendered elsewhere with a `.length <= 4` check — see the sale grid/
-          // product list renderers) — not `existing.imageUrl`, the field every photo <img> tag
-          // in the app actually reads from. Because of that mismatch, a real photo URL pulled
-          // down from the cloud always failed the emoji length check and silently fell back to
-          // the default 📦 icon: the photo never visibly synced even though it was pulled
-          // correctly from Supabase. Fixed by writing it to imageUrl instead.
           existing.imageUrl=p.image_url||existing.imageUrl;
           if(p.min_stock_alert!=null)existing.minStock=+p.min_stock_alert;
           matchedProd++;
@@ -4938,21 +4983,24 @@ img, video { max-width: 100%; height: auto; }
         }
       });
 
-      // Customers — match by phone (or name if no phone on either side). This schema has no
-      // debt/accounts-receivable column, so a pulled-in new customer starts at debt:0 — an
-      // existing local record's tracked debt is never touched (there's nothing server-side to
-      // reconcile it against anyway).
+      // Customers — match by phone (or name if no phone on either side). ยอดหนี้ (debt) เป็น
+      // แหล่งความจริงหลักบน Supabase แล้ว (ดูคอมเมนต์ตรง customerRows ในฝั่ง push) จึง "เขียนทับ"
+      // ค่า debt ในเครื่องด้วยค่าจาก Supabase เสมอ ทั้งลูกค้าที่มีอยู่แล้วและลูกค้าใหม่ — ไม่ใช่แค่
+      // ปล่อยของเดิมทิ้งไว้ (ซึ่งจะเห็นยอดหนี้เก่าไม่ตรงกับที่เครื่องอื่นขาย/รับชำระไปแล้ว) และ
+      // ไม่ใช่บวกเพิ่มจากค่าเดิม (ซึ่งจะนับซ้ำ) — เป็นการกำหนดค่าตรงๆ (=) เท่านั้น
       db.customers=db.customers||{};
       const localIdByPhone={}, localIdByName={};
       Object.values(db.customers).forEach(cu=>{ if(cu.phone)localIdByPhone[cu.phone]=cu.id; localIdByName[cu.name]=cu.id; });
       let addedCust=0;
       (custs||[]).forEach(cu=>{
         const existingId=(cu.phone&&localIdByPhone[cu.phone])||localIdByName[cu.name];
-        if(!existingId){
-          db.customers[cu.id]={id:cu.id,name:cu.name,phone:cu.phone||'',address:cu.address||'',debt:0,creditLimit:+(cu.credit_limit||0)};
+        if(existingId && db.customers[existingId]){
+          db.customers[existingId].debt=+(cu.debt||0);
+          db.customers[existingId].creditLimit=+(cu.credit_limit ?? db.customers[existingId].creditLimit ?? 0);
+        }else{
+          db.customers[cu.id]={id:cu.id,name:cu.name,phone:cu.phone||'',address:cu.address||'',debt:+(cu.debt||0),creditLimit:+(cu.credit_limit||0)};
           addedCust++;
         }
-        // else: a local record already tracks this customer — leave their local debt as-is.
       });
 
       // Bills — additive only. Never overwrite or remove a local bill; only pull in remote
@@ -5120,17 +5168,6 @@ const sb=()=>window.getSupabase?.()||null;
 const rolePerm=r=>r==='OWNER'?['ALL']:r==='MANAGER'?['SALE','PRODUCT_CREATE','PRODUCT_EDIT','PRODUCT_DELETE','PURCHASE_ORDER','GOODS_RECEIPT','REPORTS']:['SALE'];
 function ensure(){if(!window.db)return;db.users=db.users||[];if(!db.users.some(u=>u.role==='OWNER'))db.users.unshift({id:'owner-local',name:'เจ้าของร้าน',pin:'0000',role:'OWNER',permissions:['ALL'],protected:true});db.users.forEach(u=>{u.role=u.role||'CASHIER';u.permissions=u.permissions||rolePerm(u.role);});window.migratePlaintextPins?.();}
 window.ensure = ensure; // เพิ่มขึ้นมา: ให้สคริปต์บล็อกอื่น (เช่นตัวช่วยตั้งค่าเริ่มต้น) เรียกใช้ได้ด้วย ของเดิม scope ปิดอยู่ในนี้ที่เดียว
-// BUG FIX: this used to persist only {users, suppliers, purchaseOrders, cashLedger} to
-// localStorage. Everything else — every sale (db.bills), every stock/product change
-// (db.products), every customer & their debt (db.customers), categories, store settings —
-// was NEVER saved locally at all. With no Supabase connection configured (fully optional),
-// a page refresh or the browser tab being killed silently wiped out an entire day's sales.
-// Now the whole db object is persisted as one blob, matching the "Offline-First" behavior
-// the manual describes.
-// BUG FIX (#5): เดิมถ้า localStorage เต็ม (ง่ายมากถ้ามีรูปสินค้าเป็น base64 ปนอยู่เยอะๆ — ดู
-// bulk image import fallback) จะ catch เงียบๆ แค่ console.warn ผู้ใช้เห็น toast "บันทึกการขาย
-// สำเร็จ" ตามปกติ ทั้งที่ข้อมูลไม่ถูกเขียนลงเครื่องเลยจริงๆ — เพิ่ม throttle กันเด้งซ้ำถี่เกินไป
-// (ครั้งต่อไปห่างกันอย่างน้อย 10 วิ) แล้วโชว์ alert ที่มองเห็นได้จริงแทน
 let _persistFailAlertAt = 0;
 function persist(){
   try{
@@ -5163,10 +5200,6 @@ window.renderUserManagerList=function(){ensure();const c=document.getElementById
 // NOTE: the PIN input is intentionally left blank when editing — pin_hash cannot be reversed
 // back into the original PIN, so re-entering it is only required when actually changing it.
 window.editUser=id=>{const u=db.users.find(x=>x.id===id);if(!u)return;document.getElementById('edit-user-id').value=id;document.getElementById('user-name-input').value=u.name;document.getElementById('user-pin-input').value='';document.getElementById('user-pin-input').placeholder='ใส่ PIN ใหม่ (เว้นว่างไว้ถ้าไม่เปลี่ยน)';let r=document.getElementById('user-role-input');if(!r){r=document.createElement('select');r.id='user-role-input';r.className='w-full border p-2 rounded-xl text-xs';r.innerHTML='<option value="CASHIER">พนักงานขาย</option><option value="MANAGER">ผู้จัดการ</option><option value="OWNER">เจ้าของร้าน</option>';document.getElementById('user-pin-input').insertAdjacentElement('afterend',r);}r.value=u.role;};
-// BUG FIX (security): PINs were stored and would have been synced to Supabase as plaintext —
-// anyone with the anon key could read every employee's PIN straight out of the database.
-// Now only a SHA-256 hash (window.hashPin) is ever stored in db.users[].pinHash / sent as
-// app_users.pin; the raw digits never leave the input field.
 window.saveUser=async function(){if(!ok('ALL'))return;ensure();const id=document.getElementById('edit-user-id').value,n=document.getElementById('user-name-input').value.trim(),pin=document.getElementById('user-pin-input').value.trim(),role=document.getElementById('user-role-input')?.value||'CASHIER';if(!n)return window.showAlert?.('ข้อมูลไม่ถูกต้อง','กรุณากรอกชื่อพนักงาน',true);if(pin&&!/^\d{4}$/.test(pin))return window.showAlert?.('ข้อมูลไม่ถูกต้อง','PIN ต้องเป็นตัวเลข 4 หลัก',true);if(id){const u=db.users.find(x=>x.id===id);if(u.role==='OWNER'&&role!=='OWNER')return window.showAlert?.('ไม่อนุญาต','ไม่สามารถลดสิทธิ์เจ้าของร้านได้',true);const upd={name:n,role,permissions:rolePerm(role)};if(pin)upd.pinHash=await window.hashPin(pin);delete u.pin;Object.assign(u,upd);}else{if(!pin)return window.showAlert?.('ข้อมูลไม่ถูกต้อง','กรุณากำหนด PIN 4 หลักให้พนักงานใหม่',true);db.users.push({id:'u-'+Date.now(),name:n,role,permissions:rolePerm(role),pinHash:await window.hashPin(pin)});}persist();window.renderUserManagerList();window.renderEmployeeLoginScreen?.();};
 window.deleteUser=id=>{if(!ok('ALL'))return;const u=db.users.find(x=>x.id===id);if(!u||u.role==='OWNER')return window.showAlert?.('ไม่อนุญาต','ไม่สามารถลบเจ้าของร้านได้',true);db.users=db.users.filter(x=>x.id!==id);persist();window.renderUserManagerList();window.renderEmployeeLoginScreen?.();};
 
@@ -5271,14 +5304,6 @@ window.resetIdleTimer=function(){
 
 document.addEventListener('DOMContentLoaded',()=>{setTimeout(()=>window.renderEmployeeLoginScreen?.(),0);});
 
-// ==========================================
-// PRODUCT FORM — modernized: photo capture, barcode scan-to-field, multiple sizes/variants
-// per product added in one form, and split-sale ("แบ่งขาย") units manageable per variant.
-// BUG FIX: the old single-variant form always saved `variants:[{...one row...}]` — editing an
-// existing product that had more than one size (e.g. pulled in from Supabase) silently
-// DISCARDED every size but the first the moment it was saved. Now every existing variant loads
-// into the editable list and is preserved.
-// ==========================================
 let pmVariants = [];
 let pmSelectedCats = []; // multi-category selection state for the product being edited
 
@@ -5735,11 +5760,6 @@ window.syncGoodsReceiptToSupabase=async function(receipt, supplierId, docRef, te
     }).select().single();
     if(poErr) throw poErr;
 
-    // BUG FIX: poRow.id (Supabase's server-generated uuid for this purchase_orders row) was
-    // never stored back onto the local record, so accounts_payable.purchase_order_id (and any
-    // future lookup of "which server PO did this receipt become") had nothing to link to —
-    // this is the same real uuid returned by Postgres itself, not a local string id, so it's
-    // used as-is rather than passed through toUUID().
     if (apEntry) { apEntry._serverPurchaseOrderId = poRow.id; window.persist?.(); }
 
     const itemInserts = receipt.items.map(x => ({
@@ -6097,10 +6117,6 @@ document.addEventListener('DOMContentLoaded',()=>{ensure();window.renderStockTab
       return { r, rowIdx };
     });
 
-    // BUG FIX / PERF (#7): เดิม fetch รูปทีละแถวแบบ sequential (await ใน for loop) — ถ้าสินค้า
-    // หลายร้อย/พันรายการและรูปมาจากโฮสต์ภายนอกจะรวมกันช้ามาก เปลี่ยนเป็นดึงแบบขนานทีละ batch
-    // (6 รูปพร้อมกัน) เร็วขึ้นหลายเท่าโดยยังไม่ยิงคำขอพร้อมกันทั้งหมดจนโดน rate-limit ฝั่งโฮสต์รูป
-    // แคชรูปที่ดึงมาแล้วไว้ ถ้าสินค้าเดียวกันมีหลายขนาด/สีจะได้ไม่ต้องดึงรูปซ้ำ
     const imageCache = {};
     const uniqueUrls = [...new Set(rowMeta.filter(m => m.r.imgUrl && m.r.imgUrl !== '-').map(m => m.r.imgUrl))];
     const BATCH_SIZE = 6;
@@ -6187,16 +6203,6 @@ document.addEventListener('DOMContentLoaded',()=>{ensure();window.renderStockTab
 (function(){
   function esc3(v){ return window.escapeHTML ? window.escapeHTML(v) : String(v ?? ''); }
 
-  // BUG FIX: fixAction is built as `window.clearBrokenImageLinks(${JSON.stringify(idsArray)})`
-  // — JSON.stringify wraps every id in DOUBLE quotes. That was being dropped straight into
-  // onclick="${fixAction}", which is ALSO double-quoted, so the browser's HTML parser ended the
-  // attribute at the very first quote inside the JSON array instead of at the end of the
-  // button tag. The result was a truncated, invalid onclick handler — which threw
-  // "SyntaxError: Unexpected token '}'" the moment this card rendered (exactly the errors
-  // logged for the "รูปที่ไม่มีอยู่จริงบน Storage" cards). Fixed by HTML-escaping fixAction with
-  // esc3() before interpolating it: the browser decodes the escaped quotes back to real `"`
-  // when it compiles the handler, so the JSON stays syntactically valid JS while no longer
-  // breaking out of the attribute early.
   function issueCard(level, title, count, detail, fixAction){
     const style = level === 'error'
       ? 'bg-rose-50 border-rose-200 text-rose-700'
@@ -6282,11 +6288,6 @@ document.addEventListener('DOMContentLoaded',()=>{ensure();window.renderStockTab
     const client = window.getSupabaseClient?.();
     if (!client) return window.showAlert?.('ยังไม่ได้เชื่อมต่อ', 'ต้องเชื่อมต่อ Supabase ก่อนถึงจะลบรูปได้', true);
 
-    // BUG FIX: เดิมส่งไฟล์ทั้งหมดไปลบใน .remove() ครั้งเดียว — ถ้ามีเป็นพันไฟล์ (เจอจริงในร้านที่มี
-    // สินค้าเยอะ เช่น 2087 ไฟล์) เสี่ยง request timeout หรือพังกลางทางโดยไม่รู้เลยว่าลบไปแล้วกี่ไฟล์
-    // และไม่มีทางลองใหม่เฉพาะไฟล์ที่ค้างได้ — แก้เป็นแบ่งลบทีละชุด (100 ไฟล์/ครั้ง) พร้อมโชว์ความ
-    // คืบหน้าบนปุ่มเอง ถ้าชุดไหนพลาดจะเก็บเฉพาะไฟล์ที่ยังไม่สำเร็จไว้ใน window._orphanImages ทำให้
-    // กดปุ่ม "ลบทั้งหมด" ซ้ำ = ลองใหม่เฉพาะไฟล์ที่ค้างเท่านั้น ไม่ต้องเริ่มใหม่ทั้งชุด
     const CHUNK = 100;
     const failed = [];
     let doneCount = 0;
@@ -6358,10 +6359,6 @@ document.addEventListener('DOMContentLoaded',()=>{ensure();window.renderStockTab
     const client = window.getSupabaseClient?.();
     if (client) {
       try {
-        // BUG FIX: .list() คืนมาสูงสุดตาม limit ต่อครั้งเท่านั้น (limit:1000 เดิม) — ร้านที่มีรูป
-        // สินค้าเกิน 1000 ไฟล์จะเห็นแค่หน้าแรก ทำให้ไฟล์จริงที่มีอยู่แต่อยู่นอกหน้าแรกถูกเข้าใจผิด
-        // ว่า "ไม่มีอยู่จริง" ไปหมด (นี่คือสาเหตุจริงที่ตัวเลขออกมาสูงผิดปกติ เช่น 1000+ รายการ ทั้งที่
-        // รูปยังอยู่ครบ) แก้โดยวนดึงทีละหน้าจนกว่าจะได้หน้าที่สั้นกว่า limit (แปลว่าหมดแล้วจริงๆ)
         const PAGE = 1000;
         let files = [], offset = 0, guard = 0;
         while (guard++ < 50) {
