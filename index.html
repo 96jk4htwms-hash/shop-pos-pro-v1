@@ -4362,6 +4362,95 @@ img, video { max-width: 100%; height: auto; }
         window.showToast?.("บันทึกข้อมูลร้านค้าเรียบร้อยแล้ว");
       };
 
+      // ==========================================
+      // หมวดหมู่สินค้าอ้างอิงจากเว็บ YOJIONLINE.com (โครงสร้าง "หมวดหมู่สินค้า" จริงบนเว็บ
+      // ณ วันที่บันทึกหน้าเว็บ — 13 หมวดหลัก พร้อมหมวดย่อย) ใช้เป็นชุดหมวดหมู่ตั้งต้นของระบบ
+      // แทนที่จะให้ db.categories ว่างเปล่าแล้วต้องมาสร้างเองทีละหมวด — ให้ผังหมวดหมู่ในโปรแกรม
+      // "หน้าตา" ตรงกับผังหมวดหมู่บนเว็บตั้งแต่แรก
+      // ==========================================
+      const YOJI_CATEGORY_TREE = [
+        { name: 'ท่อพีวีซี', icon: '🔵', color: '#0ea5e9', children: [
+          { name: 'ท่อพีวีซีสีฟ้า' }, { name: 'ท่อพีวีซีสีเหลือง' }, { name: 'ท่อพีวีซีสีขาว' }
+        ]},
+        { name: 'อุปกรณ์ท่อพีวีซี', icon: '🔧', color: '#0ea5e9', children: [
+          { name: 'อุปกรณ์ท่อสีฟ้า' }, { name: 'อุปกรณ์ท่อสีเหลือง' }, { name: 'อุปกรณ์ท่อสีขาว' }
+        ]},
+        { name: 'อุปกรณ์ประปา ห้องน้ำ', icon: '🚿', color: '#06b6d4', children: [
+          { name: 'ก๊อกน้ำ' }, { name: 'กาวทาท่อ เทป' }, { name: 'บอลวาวล์ ประตูน้ำ' },
+          { name: 'ฝักบัว สายฉีดชำระ' }, { name: 'อุปกรณ์ประปาอื่นๆ' }
+        ]},
+        { name: 'อุปกรณ์ก่อสร้าง', icon: '🧱', color: '#a16207', children: [
+          { name: 'อุปกรณ์ทำความสะอาด' }, { name: 'วัสดุก่อสร้าง' }
+        ]},
+        { name: 'น๊อต สกรู แหวน', icon: '🔩', color: '#64748b', children: [] },
+        { name: 'สี อุปกรณ์ทาสี', icon: '🎨', color: '#ec4899', children: [
+          { name: 'สีน้ำ สีทาบ้าน สีทาอาคาร' }, { name: 'สีสเปรย์ สีพ่นพิเศษ' }, { name: 'สีน้ำมัน สีทาเหล็ก' },
+          { name: 'สีทาไม้ น้ำมันทาไม้' }, { name: 'เคมีภัณฑ์ ซ่อมแซม' }, { name: 'อุปกรณ์ทาสี' }, { name: 'ทินเนอร์ น้ำมันสน' }
+        ]},
+        { name: 'เครื่องมือช่าง ฮาร์ดแวร์', icon: '🛠️', color: '#4f46e5', children: [
+          { name: 'เทปกาว กาว ซิลิโคน' }, { name: 'เครื่องมือช่าง' }, { name: 'ใบตัด ใบเจียร์ กระดาษทราย' },
+          { name: 'เครื่องมือเชื่อม' }, { name: 'กุญแจ ลูกบิด' }, { name: 'เครื่องเขียน' }, { name: 'เครื่องมือเจาะ ดอกสว่าน' }
+        ]},
+        { name: 'เครื่องมือเกษตรและสวน', icon: '🌱', color: '#16a34a', children: [] },
+        { name: 'เครื่องมือไฟฟ้า', icon: '⚡', color: '#eab308', children: [] },
+        { name: 'สายไฟ', icon: '🔌', color: '#f59e0b', children: [] },
+        { name: 'อุปกรณ์ไฟฟ้า', icon: '💡', color: '#f59e0b', children: [
+          { name: 'หลอดไฟ' }, { name: 'อุปกรณ์ไฟฟ้าอื่นๆ' }
+        ]},
+        { name: 'ท่ออุปกรณ์เหล็กร้อยสายไฟ', icon: '🪛', color: '#78716c', children: [
+          { name: 'ท่อเหล็กร้อยสายไฟ' }, { name: 'อุปกรณ์ท่อเหล็กร้อยสายไฟ' }
+        ]},
+        { name: 'ชั้นวางสินค้า', icon: '🗄️', color: '#78716c', children: [] },
+        // ไม่มีอยู่ในผังหมวดหมู่จริงของเว็บ — เก็บสินค้าที่จับคู่หมวดหมู่จากเว็บไม่ได้ไว้ที่นี่ก่อน
+        // (มาจากคอลัมน์ "อื่นๆ" ของไฟล์นำเข้า) ต้องเข้าไปแยกหมวดที่ถูกต้องเองทีหลัง
+        { name: 'อื่นๆ', icon: '📦', color: '#94a3b8', children: [] }
+      ];
+
+      // แม็ปชื่อหมวดหมู่แบบย่อในไฟล์ Excel (คอลัมน์ "หมวดหมู่") ไปยังชื่อหมวดหมู่จริงบนเว็บ
+      // YOJIONLINE.com ด้านบน — บางหมวดแม็ปตรงเข้าหมวดหลัก บางหมวดแม็ปลงหมวดย่อยที่ใกล้เคียงที่สุด
+      const EXCEL_TO_YOJI_CATEGORY = {
+        'อื่นๆ': 'อื่นๆ',
+        'อุปกรณ์ไฟฟ้า': 'อุปกรณ์ไฟฟ้าอื่นๆ',
+        'เครื่องมือช่าง': 'เครื่องมือช่าง',
+        'อุปกรณ์ประปา': 'อุปกรณ์ประปาอื่นๆ',
+        'สีและอุปกรณ์ทาสี': 'สี อุปกรณ์ทาสี',
+        'อุปกรณ์ท่อพีวีซี ข้อต่อข้องอ PVC': 'อุปกรณ์ท่อพีวีซี',
+        'หลอดไฟ': 'หลอดไฟ',
+        'ท่อพีวีซี': 'ท่อพีวีซี',
+        'ใบตัด ใบเจียร์ กระดาษทราย': 'ใบตัด ใบเจียร์ กระดาษทราย',
+        'เทปและกาว': 'เทปกาว กาว ซิลิโคน',
+        'อุปกรณ์ก่อสร้าง': 'อุปกรณ์ก่อสร้าง',
+        'กุญแจและอุปกรณ์ล็อค': 'กุญแจ ลูกบิด',
+        'เครื่องเขียน': 'เครื่องเขียน',
+        'อุปกรณ์ยึดจับ/สกรู-น็อต': 'น๊อต สกรู แหวน',
+        'สายไฟ': 'สายไฟ',
+        'เครื่องมือเกษตรและสวน': 'เครื่องมือเกษตรและสวน',
+        'สารเคมีและน้ำยา': 'เคมีภัณฑ์ ซ่อมแซม',
+        'อุปกรณ์ทำความสะอาด': 'อุปกรณ์ทำความสะอาด',
+        'อุปกรณ์นิรภัย': 'อื่นๆ'
+      };
+
+      // สร้างหมวดหมู่ตามผัง YOJI_CATEGORY_TREE ลงใน db.categories — ทำงานแบบ idempotent
+      // (เช็กชื่อซ้ำก่อนเสมอ ไม่สร้างหมวดซ้ำถ้ามีอยู่แล้ว เช่น ผู้ใช้เคยสร้าง/แก้เองมาก่อน)
+      // คืนค่าเป็น Set ของชื่อหมวดหมู่ทั้งหมดที่มีอยู่หลังสร้างเสร็จ ไว้เช็คก่อน assign หมวดให้สินค้า
+      window.seedYojiCategories = function() {
+        db.categories = db.categories || [];
+        const byName = name => db.categories.find(c => c.name === name);
+        YOJI_CATEGORY_TREE.forEach(top => {
+          let parent = byName(top.name);
+          if (!parent) {
+            parent = { id: 'cat-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: top.name, icon: top.icon, color: top.color, parentId: null };
+            db.categories.push(parent);
+          }
+          (top.children || []).forEach(child => {
+            if (!byName(child.name)) {
+              db.categories.push({ id: 'cat-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: child.name, icon: top.icon, color: top.color, parentId: parent.id });
+            }
+          });
+        });
+        return new Set(db.categories.map(c => c.name));
+      };
+
       window.handleOpeningStockFile = function(e) {
         const file = e.target.files[0];
         if (!file) return;
@@ -4373,20 +4462,26 @@ img, video { max-width: 100%; height: auto; }
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
           const json = XLSX.utils.sheet_to_json(sheet);
 
-          pendingImportList = json.map((row, idx) => ({
-            id: 'P_IMP_' + idx,
-            name: row['ชื่อสินค้า'] || row['Name'] || 'สินค้าใหม่',
-            code: row['SKU'] || row['บาร์โค้ด'] || ('SKU' + idx),
-            cost: parseFloat(row['ราคาทุน'] || row['Cost']) || 0,
-            price: parseFloat(row['ราคาขาย'] || row['Price']) || 0,
-            stock: parseFloat(row['ยอดยกมา'] || row['Stock']) || 0
-          }));
+          pendingImportList = json.map((row, idx) => {
+            const rawCat = (row['หมวดหมู่'] || row['Category'] || '').toString().trim();
+            return {
+              id: 'P_IMP_' + idx,
+              name: row['ชื่อสินค้า'] || row['Name'] || 'สินค้าใหม่',
+              code: row['SKU'] || row['บาร์โค้ด'] || ('SKU' + idx),
+              cost: parseFloat(row['ราคาทุน'] || row['Cost']) || 0,
+              price: parseFloat(row['ราคาขาย'] || row['Price']) || 0,
+              stock: parseFloat(row['ยอดยกมา'] || row['Stock']) || 0,
+              // หมวดหมู่ที่แม็ปแล้วให้ตรงกับผังหมวดหมู่จริงบนเว็บ YOJIONLINE.com (ถ้าไม่พบใน
+              // ตารางแม็ป ให้ตกไปหมวด "อื่นๆ" ไว้ก่อน — เหมือนที่ไฟล์ Excel เดาไม่ได้เช่นกัน)
+              category: EXCEL_TO_YOJI_CATEGORY[rawCat] || 'อื่นๆ'
+            };
+          });
 
           document.getElementById('import-preview-box').classList.remove('hidden');
           document.getElementById('import-preview-table').innerHTML = `
             <table class="w-full text-left text-xs">
-              <thead class="bg-slate-100 font-bold"><tr><th class="p-2">ชื่อ</th><th class="p-2">ทุน</th><th class="p-2">ขาย</th><th class="p-2">ยอดยกมา</th></tr></thead>
-              <tbody class="divide-y">${pendingImportList.map(i => `<tr><td class="p-2">${escapeHTML(i.name)}</td><td class="p-2">฿${i.cost}</td><td class="p-2">฿${i.price}</td><td class="p-2 font-bold text-indigo-600">${i.stock}</td></tr>`).join('')}</tbody>
+              <thead class="bg-slate-100 font-bold"><tr><th class="p-2">ชื่อ</th><th class="p-2">หมวดหมู่ (ตามเว็บ)</th><th class="p-2">ทุน</th><th class="p-2">ขาย</th><th class="p-2">ยอดยกมา</th></tr></thead>
+              <tbody class="divide-y">${pendingImportList.map(i => `<tr><td class="p-2">${escapeHTML(i.name)}</td><td class="p-2"><span class="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-full px-2 py-0.5">${escapeHTML(i.category)}</span></td><td class="p-2">฿${i.cost}</td><td class="p-2">฿${i.price}</td><td class="p-2 font-bold text-indigo-600">${i.stock}</td></tr>`).join('')}</tbody>
             </table>
           `;
         };
@@ -4394,17 +4489,23 @@ img, video { max-width: 100%; height: auto; }
       };
 
       window.confirmOpeningStockImport = function() {
+        // สร้างผังหมวดหมู่ให้ตรงกับเว็บ YOJIONLINE.com ก่อนเสมอ (idempotent) แล้วค่อยผูกสินค้า
+        // แต่ละชิ้นเข้ากับหมวดที่แม็ปไว้ — แทนที่การยัดทุกชิ้นลงหมวด "งานทั่วไป" แบบเดิม
+        const knownCatNames = window.seedYojiCategories();
         pendingImportList.forEach(item => {
+          const cat = knownCatNames.has(item.category) ? item.category : 'อื่นๆ';
           db.products[item.id] = {
-            id: item.id, name: item.name, code: item.code, cat: ['งานทั่วไป'], image: '📦',
+            id: item.id, name: item.name, code: item.code, cat: [cat], image: '📦',
             variants: [{ id: 'v_' + item.id, sizeName: 'ปกติ', barcode: item.code, cost: item.cost, price: item.price, stock: item.stock }]
           };
         });
         window.persist?.();
+        window.renderCategoryManagerList?.();
+        window.renderCategoryParentOptions?.();
         window.renderStockTable?.();
         window.renderSaleHome?.();
         window.populatePOPickers?.();
-        window.showToast?.(`ยกยอดสินค้าเข้าคลังเรียบร้อย ${pendingImportList.length} รายการ`);
+        window.showToast?.(`ยกยอดสินค้าเข้าคลังเรียบร้อย ${pendingImportList.length} รายการ พร้อมจัดหมวดหมู่ตามเว็บ YOJIONLINE.com แล้ว — ควรตรวจทานหมวด "อื่นๆ" อีกครั้ง`);
         pendingImportList = [];
         document.getElementById('import-preview-box').classList.add('hidden');
       };
