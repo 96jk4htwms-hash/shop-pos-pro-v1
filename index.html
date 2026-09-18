@@ -249,6 +249,9 @@
   <div id="auth-form" class="grid gap-2">
     <input id="auth-email" placeholder="อีเมล">
     <input id="auth-password" type="password" placeholder="รหัสผ่าน">
+    <p class="text-[10px] text-slate-500 mt-1">กรอก 2 ช่องข้างล่างนี้เฉพาะตอน "สมัคร (ครั้งแรก)" เท่านั้น — ใช้ตั้งค่าบัญชีเจ้าของร้านคนแรกของร้าน (PIN นี้จะใช้ล็อกอินหน้าขายด้วย)</p>
+    <input id="auth-owner-name" placeholder="ชื่อเจ้าของร้าน (สำหรับสมัครครั้งแรก)">
+    <input id="auth-owner-pin" placeholder="PIN 4 หลัก (สำหรับสมัครครั้งแรก)" maxlength="4" inputmode="numeric">
     <div class="grid grid-cols-2 gap-2">
       <button class="btn btn-ghost" onclick="doSignUp()">สมัคร (ครั้งแรก)</button>
       <button class="btn btn-primary" onclick="doSignIn()">เข้าสู่ระบบ</button>
@@ -604,12 +607,22 @@ async function doSignUp() {
   const client = getClient(); if (!client) return log('err', 'ยังไม่ได้เชื่อมต่อ Supabase');
   const email = document.getElementById('auth-email').value.trim();
   const password = document.getElementById('auth-password').value;
+  const ownerName = document.getElementById('auth-owner-name').value.trim();
+  const ownerPin = document.getElementById('auth-owner-pin').value.trim();
   if (!email || !password) return log('err', 'กรอกอีเมล/รหัสผ่านให้ครบ');
   if (password.length < 6) return log('err', 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร');
+  if (!ownerName) return log('err', 'กรอกชื่อเจ้าของร้าน (ใช้ตั้งค่าบัญชีเจ้าของร้านคนแรก)');
+  if (!/^\d{4}$/.test(ownerPin)) return log('err', 'PIN เจ้าของร้านต้องเป็นตัวเลข 4 หลัก');
   const { data, error } = await client.auth.signUp({ email, password });
   if (error) return log('err', 'สมัครไม่สำเร็จ: ' + fmtErr(error));
-  if (data.session) { log('ok', 'สมัครและเข้าสู่ระบบสำเร็จ'); refreshAuthStatus(); refreshConn(); }
-  else log('ok', 'สมัครสำเร็จ — เช็คอีเมลยืนยันตัวตนก่อนถ้าโปรเจกต์บังคับ');
+  if (data.session) {
+    log('ok', 'สมัครและเข้าสู่ระบบสำเร็จ');
+    refreshAuthStatus(); refreshConn();
+    await ensureOwnerBootstrap(ownerName, ownerPin);
+  } else {
+    log('ok', 'สมัครสำเร็จ — โปรเจกต์นี้บังคับยืนยันอีเมลก่อนถึงจะใช้งานได้ (เช็คอีเมล แล้วกลับมากด "เข้าสู่ระบบ" หลังยืนยันแล้ว การตั้งค่าเจ้าของร้านจะทำอัตโนมัติตอนเข้าสู่ระบบสำเร็จครั้งแรก)');
+    _pendingOwnerBootstrap = { name: ownerName, pin: ownerPin };
+  }
 }
 async function doSignIn() {
   const client = getClient(); if (!client) return log('err', 'ยังไม่ได้เชื่อมต่อ Supabase');
@@ -619,6 +632,44 @@ async function doSignIn() {
   if (error) return log('err', 'เข้าสู่ระบบไม่สำเร็จ: ' + fmtErr(error));
   log('ok', 'เข้าสู่ระบบสำเร็จ: ' + email);
   refreshAuthStatus(); refreshConn();
+  if (_pendingOwnerBootstrap) { await ensureOwnerBootstrap(_pendingOwnerBootstrap.name, _pendingOwnerBootstrap.pin); _pendingOwnerBootstrap = null; }
+  else await checkAppUserLink();
+}
+let _pendingOwnerBootstrap = null;
+// ============================================================================
+// ผูกบัญชี Supabase Auth ที่เพิ่งเข้าสู่ระบบเข้ากับตาราง app_users (สร้างแถว OWNER คนแรกถ้ายังไม่มี)
+// จำเป็นมาก: is_staff()/is_manager()/is_owner() บนเซิร์ฟเวอร์ (ที่ RLS ทุกตารางใช้ตรวจสิทธิ์) เช็ค
+// จากตาราง app_users เท่านั้น ไม่ใช่จาก auth.users ตรงๆ — auth เฉยๆ ไม่มี app_users แปลว่า RLS
+// จะปฏิเสธการเขียนทุกตารางเงียบๆ (error code 42501) ทั้งที่ล็อกอินสำเร็จแล้วก็ตาม
+// ============================================================================
+async function ensureOwnerBootstrap(name, pin) {
+  const client = getClient(); if (!client) return;
+  const { data: { session } } = await client.auth.getSession();
+  if (!session?.user) return;
+  const linked = await checkAppUserLink();
+  if (linked) return;
+  try {
+    const ownerLocal = db.users.find(u => u.role === 'OWNER') || db.users[0];
+    ownerLocal.name = name;
+    ownerLocal.pinHash = await hashPin(pin, toUUID(ownerLocal.id));
+    persist(); renderAll(); updateActiveUserBadge();
+    const { error } = await client.rpc('bootstrap_first_owner', { p_name: name, p_pin: ownerLocal.pinHash });
+    if (error) {
+      if (String(error.message||'').includes('มี OWNER อยู่แล้ว')) { log('info', 'มีเจ้าของร้านบนคลาวด์อยู่แล้ว — บัญชีนี้ยังไม่ได้ผูกกับ app_users ที่มีอยู่ กรุณาติดต่อเจ้าของร้านเดิมให้เพิ่มบัญชีนี้เป็นพนักงานผ่านแท็บพนักงานแทน'); return; }
+      throw error;
+    }
+    log('ok', `ตั้งค่าเจ้าของร้าน "${name}" บนคลาวด์สำเร็จ — พร้อมซิงค์แล้ว`);
+  } catch (err) { log('err', `ตั้งค่าเจ้าของร้านบนคลาวด์ไม่สำเร็จ: ${fmtErr(err)} — การซิงค์จะยังใช้ไม่ได้จนกว่าจะแก้จุดนี้`); }
+}
+async function checkAppUserLink() {
+  const client = getClient(); if (!client) return false;
+  const { data: { session } } = await client.auth.getSession();
+  if (!session?.user) return false;
+  const { data, error } = await client.from('app_users').select('role,name').eq('auth_user_id', session.user.id).maybeSingle();
+  if (error) { log('err', `ตรวจสอบสิทธิ์บัญชีไม่สำเร็จ: ${fmtErr(error)}`); return false; }
+  if (data) { log('info', `บัญชีนี้ผูกกับ app_users แล้ว: ${data.name} (${data.role})`); return true; }
+  log('err', '⚠️ บัญชีนี้ยังไม่ได้ผูกกับ app_users บนคลาวด์ — การซิงค์ทุกตารางจะถูก RLS ปฏิเสธจนกว่าจะผูกบัญชี (ถ้าเป็นเจ้าของร้านคนแรก ให้สมัครใหม่ผ่านปุ่ม "สมัคร (ครั้งแรก)" แทน "เข้าสู่ระบบ")');
+  return false;
 }
 async function doSignOut() {
   const client = getClient(); if (!client) return;
@@ -664,7 +715,10 @@ async function verifyPin() {
     setTimeout(() => document.getElementById('pin-error').classList.add('hidden'), 1200);
   }
 }
-function lockPOS() { db.activeUser = null; persist(); updateActiveUserBadge(); renderPinLoginScreen(); }
+function lockPOS() {
+  if (!db.users.some(u => u.pinHash)) return log('err', 'ยังไม่มีใครตั้ง PIN เลย — ไปตั้ง PIN ให้พนักงาน/เจ้าของร้านที่แท็บพนักงานก่อนถึงจะล็อกหน้าจอได้ (ไม่งั้นจะเข้าแอปไม่ได้อีก)');
+  db.activeUser = null; persist(); updateActiveUserBadge(); renderPinLoginScreen();
+}
 function updateActiveUserBadge() { document.getElementById('active-user-badge').textContent = db.activeUser ? '👤 ' + db.activeUser.name : ''; }
 async function switchSupabaseSessionForEmployee(user) {
   if (!user?.authEmail || !user?.authPassword) return;
@@ -1372,7 +1426,9 @@ async function pullFromSupabase() {
 // 20. INIT
 // ============================================================================
 renderAll(); renderProductGrid(); renderCart(); renderShiftBadge(); renderHeldList(); updateActiveUserBadge(); refreshConn();
-if (!db.activeUser) renderPinLoginScreen();
+// หน้าจอล็อก PIN ขึ้นเฉพาะตอนมีพนักงานที่ตั้ง PIN ไว้แล้วอย่างน้อย 1 คนเท่านั้น — เครื่องที่เพิ่งติดตั้ง
+// ใหม่ (ยังไม่มีใครตั้ง PIN เลย) ต้องเข้าถึงแท็บตั้งค่าได้เสมอ ไม่งั้นจะสมัคร/ตั้งค่าเจ้าของร้านไม่ได้เลย
+if (!db.activeUser && db.users.some(u => u.pinHash)) renderPinLoginScreen();
 </script>
 </body>
 </html>
