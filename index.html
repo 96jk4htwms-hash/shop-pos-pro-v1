@@ -130,10 +130,20 @@
      ============================================================================ -->
 <div id="page-products" class="card hidden">
   <div class="flex justify-between items-center mb-2">
-    <h2 class="font-bold text-sm">สินค้า</h2>
+    <h2 class="font-bold text-sm">สินค้า <span class="text-slate-400 font-normal" id="prod-count"></span></h2>
     <button class="btn btn-primary" onclick="openProductModal()">+ เพิ่มสินค้า</button>
   </div>
-  <table><thead><tr><th></th><th>ชื่อ</th><th>SKU</th><th>ราคา</th><th>สต็อก</th><th></th></tr></thead><tbody id="tbl-products"></tbody></table>
+  <div class="flex gap-2 mb-2 flex-wrap">
+    <select id="prod-filter-cat" onchange="renderAll()" style="width:auto"><option value="">ทุกหมวดหมู่</option></select>
+    <select id="prod-sort" onchange="renderAll()" style="width:auto">
+      <option value="name">เรียง: ชื่อ ก-ฮ</option>
+      <option value="margin_desc">เรียง: ส่วนต่างมาก→น้อย</option>
+      <option value="margin_asc">เรียง: ส่วนต่างน้อย→มาก</option>
+      <option value="stock_asc">เรียง: สต็อกน้อย→มาก</option>
+      <option value="stock_desc">เรียง: สต็อกมาก→น้อย</option>
+    </select>
+  </div>
+  <table><thead><tr><th></th><th>สินค้า / ขนาด</th><th>รหัส</th><th>ราคา</th><th>ทุน</th><th>ส่วนต่าง</th><th>สต็อก</th><th></th></tr></thead><tbody id="tbl-products"></tbody></table>
   <h3 class="font-bold text-sm mt-4 mb-2">หมวดหมู่</h3>
   <button class="btn btn-ghost mb-2" onclick="openCategoryModal()">+ เพิ่มหมวดหมู่</button>
   <table><thead><tr><th>ไอคอน</th><th>ชื่อ</th><th></th></tr></thead><tbody id="tbl-categories"></tbody></table>
@@ -757,9 +767,9 @@ function openProductModal(id) {
   document.getElementById('prod-id').value = id || '';
   document.getElementById('prod-name').value = p?.name || '';
   document.getElementById('prod-sku').value = p?.code || '';
-  pmVariants = p ? p.variants.map(v => ({ ...v, fractions: (v.fractions||[]).map(f => ({...f})) })) : [{ id: 'v-'+Date.now(), sizeName:'ปกติ', barcode:'', price:0, cost:0, stock:0, minStock:5, fractions:[] }];
+  pmVariants = p ? p.variants.map(v => ({ ...v, fractions: (v.fractions||[]).map(f => ({...f})) })) : [{ id: 'v-'+Date.now(), sizeName:'ปกติ', sku:'', barcode:'', imageUrl:null, imageFile:null, price:0, cost:0, stock:0, minStock:5, fractions:[] }];
   pmSelectedCats = p ? [...p.cat] : [];
-  pmImageUrl = p?.imageUrl || null; pmImageFile = null;
+  pmImageUrl = p?.imageUrl || null; pmImageFile = null; _variantPreview = {};
   const preview = document.getElementById('prod-image-preview');
   if (pmImageUrl) { preview.src = pmImageUrl; preview.classList.remove('hidden'); } else preview.classList.add('hidden');
   document.getElementById('prod-image-status').textContent = '';
@@ -774,7 +784,11 @@ function renderProdCatChips() {
 }
 function toggleProdCat(name) { const i = pmSelectedCats.indexOf(name); if (i>=0) pmSelectedCats.splice(i,1); else pmSelectedCats.push(name); renderProdCatChips(); }
 function renderVariantRows() {
-  document.getElementById('prod-variants').innerHTML = pmVariants.map((v,i) => `
+  document.getElementById('prod-variants').innerHTML = pmVariants.map((v,i) => {
+    const margin = (parseFloat(v.price)||0) - (parseFloat(v.cost)||0);
+    const marginPct = (parseFloat(v.cost)||0) > 0 ? (margin/parseFloat(v.cost)*100).toFixed(0) : '-';
+    const imgSrc = v.imageUrl || null;
+    return `
     <div class="border rounded-lg p-2">
       <div class="grid grid-cols-2 gap-1 mb-1">
         <input placeholder="ชื่อขนาด" value="${v.sizeName||''}" onchange="pmVariants[${i}].sizeName=this.value">
@@ -782,16 +796,32 @@ function renderVariantRows() {
           <input placeholder="บาร์โค้ด" value="${v.barcode||''}" onchange="pmVariants[${i}].barcode=this.value" id="variant-barcode-${i}">
           <button type="button" class="btn btn-ghost px-2" onclick="openScanner('variant-barcode-${i}')">📷</button>
         </div>
-        <input type="number" placeholder="ราคาขาย" value="${v.price||0}" onchange="pmVariants[${i}].price=parseFloat(this.value)||0">
-        <input type="number" placeholder="ต้นทุน" value="${v.cost||0}" onchange="pmVariants[${i}].cost=parseFloat(this.value)||0">
-        <input type="number" placeholder="สต็อก" value="${v.stock||0}" onchange="pmVariants[${i}].stock=parseFloat(this.value)||0">
+        <input placeholder="รหัสสินค้า (SKU) — เว้นว่าง = ใช้รหัสเดียวกับสินค้าหลัก" class="col-span-2" value="${v.sku||''}" onchange="pmVariants[${i}].sku=this.value.trim()">
+        <input type="number" placeholder="ราคาขาย" value="${v.price||0}" onchange="pmVariants[${i}].price=parseFloat(this.value)||0;renderVariantRows();">
+        <input type="number" placeholder="ต้นทุน" value="${v.cost||0}" onchange="pmVariants[${i}].cost=parseFloat(this.value)||0;renderVariantRows();">
+        <input type="number" placeholder="สต็อก (แยกเฉพาะขนาดนี้)" value="${v.stock||0}" onchange="pmVariants[${i}].stock=parseFloat(this.value)||0">
         <input type="number" placeholder="สต็อกขั้นต่ำ" value="${v.minStock||5}" onchange="pmVariants[${i}].minStock=parseFloat(this.value)||0">
       </div>
+      <div class="text-[10px] text-slate-500 mb-1">ส่วนต่าง (กำไรต่อหน่วย): <b class="${margin<0?'text-rose-600':'text-emerald-600'}">${formatMoney(margin)}</b> ${marginPct!=='-' ? `(${marginPct}%)` : ''}</div>
+      <div class="flex items-center gap-2 mb-1">
+        ${(_variantPreview[i]||imgSrc) ? `<img src="${_variantPreview[i]||imgSrc}" class="w-10 h-10 rounded object-cover border">` : '<div class="w-10 h-10 rounded border flex items-center justify-center text-slate-300 text-[9px] text-center">รูปสินค้าหลัก</div>'}
+        <input type="file" accept="image/*" class="text-[10px]" onchange="onVariantImageChosen(event,${i})">
+      </div>
+      <div class="text-[9px] text-slate-400 mb-2">รูป — เว้นว่าง = ใช้รูปเดียวกับสินค้าหลัก (กรณีต่างกันแค่ขนาด) / เลือกไฟล์ = รูปเฉพาะขนาดนี้ (กรณีสีคนละสี/ลักษณะคนละแบบ)</div>
       <div class="text-[10px] font-bold text-slate-500 mb-1">หน่วยแบ่งขาย (เช่น ตัดขายเป็นเมตรจากม้วน)</div>
       <div id="frac-list-${i}">${renderFractionRows(i)}</div>
       <button type="button" class="btn btn-ghost text-[10px] py-1 px-2 mt-1" onclick="addFractionRow(${i})">+ เพิ่มหน่วยแบ่งขาย</button>
       <button class="btn btn-danger w-full text-[10px] py-1 mt-2" onclick="removeVariantRow(${i})">ลบขนาดนี้</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+let _variantPreview = {};
+function onVariantImageChosen(evt, idx) {
+  const file = evt.target.files[0]; if (!file) return;
+  pmVariants[idx].imageFile = file;
+  const reader = new FileReader();
+  reader.onload = () => { _variantPreview[idx] = reader.result; renderVariantRows(); };
+  reader.readAsDataURL(file);
 }
 function renderFractionRows(vi) {
   const v = pmVariants[vi];
@@ -804,7 +834,7 @@ function renderFractionRows(vi) {
     </div>`).join('');
 }
 function addFractionRow(vi) { pmVariants[vi].fractions = pmVariants[vi].fractions || []; pmVariants[vi].fractions.push({ id:'f-'+Date.now()+Math.random().toString(36).slice(2,5), fractionName:'', quantityRatio:1, price:0 }); document.getElementById('frac-list-'+vi).innerHTML = renderFractionRows(vi); }
-function addVariantRow() { pmVariants.push({ id:'v-'+Date.now()+Math.random().toString(36).slice(2,6), sizeName:'', barcode:'', price:0, cost:0, stock:0, minStock:5, fractions:[] }); renderVariantRows(); }
+function addVariantRow() { pmVariants.push({ id:'v-'+Date.now()+Math.random().toString(36).slice(2,6), sizeName:'', sku:'', barcode:'', imageUrl:null, imageFile:null, price:0, cost:0, stock:0, minStock:5, fractions:[] }); renderVariantRows(); }
 function removeVariantRow(i) { pmVariants.splice(i,1); renderVariantRows(); }
 
 function onProductImageChosen(evt) {
@@ -831,6 +861,18 @@ async function uploadProductImageIfNeeded(pid) {
     return pmImageUrl;
   }
 }
+// รหัส (SKU) ที่ถูกใช้ไปแล้วทั้งระบบ — ทั้งรหัสสินค้าหลัก (products.code) และรหัสเฉพาะขนาด
+// (variant.sku) ต้องไม่ชนกัน ไม่งั้นตอนซิงค์ขึ้น Supabase จะชนกับ unique index ที่เพิ่งเพิ่ม
+// (ดู pos_schema.sql ข้อ 21) — เช็คฝั่ง client ก่อนเพื่อบอกสาเหตุที่เข้าใจง่ายกว่า error จาก DB
+function collectUsedSkus(excludePid) {
+  const used = new Map(); // sku(lowercase) -> คำอธิบายว่าใช้อยู่ที่ไหน
+  Object.values(db.products).forEach(p => {
+    if (p.id === excludePid) return;
+    if (p.code) used.set(p.code.toLowerCase(), `สินค้าหลัก "${p.name}"`);
+    (p.variants||[]).forEach(v => { if (v.sku) used.set(v.sku.toLowerCase(), `ขนาด "${v.sizeName}" ของ "${p.name}"`); });
+  });
+  return used;
+}
 async function saveProduct() {
   const id = document.getElementById('prod-id').value;
   const name = document.getElementById('prod-name').value.trim();
@@ -838,11 +880,47 @@ async function saveProduct() {
   if (!pmVariants.length) return log('err', 'เพิ่มขนาด/รุ่นอย่างน้อย 1 รายการ');
   let sku = document.getElementById('prod-sku').value.trim();
   if (!sku) sku = 'SKU' + Date.now();
+
+  // ตรวจรหัสชนกันก่อนบันทึก (รหัสหลัก + รหัสเฉพาะขนาดทุกตัว + กันชนกันเองภายในสินค้าเดียวกันด้วย)
+  const usedElsewhere = collectUsedSkus(id || null);
+  if (usedElsewhere.has(sku.toLowerCase())) return log('err', `รหัส "${sku}" ถูกใช้ไปแล้วที่ ${usedElsewhere.get(sku.toLowerCase())} — ตั้งรหัสอื่น`);
+  const seenInThisForm = new Set([sku.toLowerCase()]);
+  for (const v of pmVariants) {
+    if (!v.sku) continue;
+    const key = v.sku.toLowerCase();
+    if (usedElsewhere.has(key)) return log('err', `รหัสขนาด "${v.sku}" ถูกใช้ไปแล้วที่ ${usedElsewhere.get(key)} — ตั้งรหัสอื่น`);
+    if (seenInThisForm.has(key)) return log('err', `รหัส "${v.sku}" ซ้ำกันเองภายในสินค้านี้ — แต่ละขนาดต้องมีรหัสไม่ซ้ำกัน`);
+    seenInThisForm.add(key);
+  }
+
   const pid = id || ('p-' + Date.now());
   const imageUrl = await uploadProductImageIfNeeded(pid);
-  db.products[pid] = { id: pid, name, code: sku, imageUrl, cat: pmSelectedCats.slice(), variants: pmVariants.map(v => ({ ...v })) };
+  const variants = [];
+  for (let vi = 0; vi < pmVariants.length; vi++) {
+    const clean = { ...pmVariants[vi] };
+    if (clean.imageFile) { clean.imageUrl = await uploadVariantImageIfNeeded(pid, clean, _variantPreview[vi]); }
+    delete clean.imageFile;
+    variants.push(clean);
+  }
+  db.products[pid] = { id: pid, name, code: sku, imageUrl, cat: pmSelectedCats.slice(), variants };
   persist(); renderAll(); renderProductGrid(); closeModal('modal-product');
-  log('ok', (id ? 'แก้ไข' : 'เพิ่ม') + `สินค้า "${name}" สำเร็จ`);
+  log('ok', (id ? 'แก้ไข' : 'เพิ่ม') + `สินค้า "${name}" สำเร็จ (${variants.length} ขนาด)`);
+}
+async function uploadVariantImageIfNeeded(pid, variant, previewDataUrl) {
+  const client = getClient();
+  // ยังไม่ได้เชื่อมต่อ Supabase — เก็บรูปพรีวิว (base64) ไว้ในเครื่องนี้ไปก่อน อัปโหลดจริงทีหลังตอน
+  // แก้ไขสินค้านี้ใหม่อีกครั้งหลังเชื่อมต่อแล้ว (เหมือนพฤติกรรมรูปสินค้าหลักที่ทำไว้แล้ว)
+  if (!client) { log('info', `ขนาด "${variant.sizeName}": ยังไม่ได้เชื่อมต่อ Supabase — เก็บรูปพรีวิวไว้ในเครื่องนี้ก่อน`); return previewDataUrl || variant.imageUrl || null; }
+  try {
+    const path = `${pid}_${variant.id}_${Date.now()}.jpg`;
+    const { error } = await client.storage.from('product-images').upload(path, variant.imageFile, { contentType: variant.imageFile.type || 'image/jpeg', upsert: true });
+    if (error) throw error;
+    const { data } = client.storage.from('product-images').getPublicUrl(path);
+    return data.publicUrl;
+  } catch (err) {
+    log('err', `อัปโหลดรูปขนาด "${variant.sizeName}" ไม่สำเร็จ: ${fmtErr(err)}`);
+    return previewDataUrl || variant.imageUrl || null;
+  }
 }
 function deleteProduct(id) { if (!confirm('ลบสินค้านี้?')) return; delete db.products[id]; persist(); renderAll(); renderProductGrid(); }
 
@@ -913,16 +991,69 @@ function deleteSupplier(id) { if (!confirm('ลบซัพพลายเออ
 function renderAll() {
   document.getElementById('tbl-categories').innerHTML = db.categories.map(c => `<tr><td>${c.icon}</td><td>${c.name}</td><td class="text-right"><button class="text-indigo-600 font-bold" onclick="openCategoryModal('${c.id}')">แก้ไข</button>&nbsp;<button class="text-rose-600 font-bold" onclick="deleteCategory('${c.id}')">ลบ</button></td></tr>`).join('') || '<tr><td colspan="3" class="text-slate-400 text-center py-3">ยังไม่มีหมวดหมู่</td></tr>';
 
-  document.getElementById('tbl-products').innerHTML = Object.values(db.products).map(p => {
-    const v = p.variants[0] || {}; const totalStock = p.variants.reduce((s,x) => s + (x.stock||0), 0);
-    return `<tr><td>${p.imageUrl ? `<img src="${p.imageUrl}" class="w-8 h-8 rounded object-cover">` : '📦'}</td><td>${p.name}</td><td>${p.code}</td><td>${formatMoney(v.price||0)}</td><td>${totalStock}</td><td class="text-right"><button class="text-indigo-600 font-bold" onclick="openProductModal('${p.id}')">แก้ไข</button>&nbsp;<button class="text-rose-600 font-bold" onclick="deleteProduct('${p.id}')">ลบ</button></td></tr>`;
-  }).join('') || '<tr><td colspan="6" class="text-slate-400 text-center py-3">ยังไม่มีสินค้า</td></tr>';
+  renderProductsTable();
 
   document.getElementById('tbl-customers').innerHTML = Object.values(db.customers).map(c => `<tr><td>${c.name}</td><td>${c.phone||'-'}</td><td>${formatMoney(c.creditLimit||0)}</td><td>${formatMoney(c.debt||0)}</td><td class="text-right"><button class="text-emerald-600 font-bold" onclick="openPaymentModal('${c.id}')">รับชำระ</button>&nbsp;<button class="text-indigo-600 font-bold" onclick="openCustomerModal('${c.id}')">แก้ไข</button>&nbsp;<button class="text-rose-600 font-bold" onclick="deleteCustomer('${c.id}')">ลบ</button></td></tr>`).join('') || '<tr><td colspan="5" class="text-slate-400 text-center py-3">ยังไม่มีลูกค้า</td></tr>';
 
   document.getElementById('tbl-suppliers').innerHTML = Object.entries(db.suppliers).map(([sid,s]) => `<tr><td>${s.name}</td><td>${s.phone||'-'}</td><td class="text-right"><button class="text-indigo-600 font-bold" onclick="openSupplierModal('${sid}')">แก้ไข</button>&nbsp;<button class="text-rose-600 font-bold" onclick="deleteSupplier('${sid}')">ลบ</button></td></tr>`).join('') || '<tr><td colspan="3" class="text-slate-400 text-center py-3">ยังไม่มีซัพพลายเออร์</td></tr>';
 
   renderPOTable(); renderEmployeeTable();
+}
+
+// ============================================================================
+// 9b. PRODUCTS TABLE — หนึ่งแถวต่อหนึ่ง "ขนาด/รหัส" จริง (ไม่รวมทุกขนาดไว้ในแถวเดียวเหมือนเดิม)
+// เพราะขนาดที่มีรหัส (SKU) ของตัวเอง ต้องเห็นเป็นรายการสต็อกแยกต่างหากในรายการสินค้าได้จริง —
+// จุดนี้คือสิ่งที่ผู้ใช้รายงานว่า "เพิ่มขนาดแล้วหาสินค้าที่เพิ่มไม่เจอในรายการสินค้า" เพราะของเดิม
+// ยุบทุกขนาดไว้ในแถวเดียวของสินค้าหลัก มองไม่เห็นรหัส/สต็อกของขนาดที่เพิ่มมาเลย
+// ============================================================================
+function populateProductCategoryFilter() {
+  const el = document.getElementById('prod-filter-cat'); if (!el) return;
+  const current = el.value;
+  el.innerHTML = '<option value="">ทุกหมวดหมู่</option>' + db.categories.map(c => `<option value="${c.name}">${c.icon} ${c.name}</option>`).join('');
+  el.value = current;
+}
+function renderProductsTable() {
+  const tbl = document.getElementById('tbl-products'); if (!tbl) return;
+  populateProductCategoryFilter();
+  const catFilter = document.getElementById('prod-filter-cat')?.value || '';
+  const sortMode = document.getElementById('prod-sort')?.value || 'name';
+
+  // แปลงเป็น "แถว" ระดับขนาด/variant หนึ่งแถวต่อหนึ่งรายการสต็อกจริง กลุ่มกันด้วย productId
+  let rows = [];
+  Object.values(db.products).forEach(p => {
+    if (catFilter && !(p.cat||[]).includes(catFilter)) return;
+    (p.variants||[]).forEach((v,vi) => {
+      const effectiveSku = v.sku || p.code;
+      const effectiveImage = v.imageUrl || p.imageUrl;
+      const margin = (parseFloat(v.price)||0) - (parseFloat(v.cost)||0);
+      rows.push({ p, v, vi, effectiveSku, effectiveImage, margin, groupSize: p.variants.length });
+    });
+  });
+  let totalCount = rows.length;
+
+  if (sortMode === 'name') rows.sort((a,b) => a.p.name.localeCompare(b.p.name,'th') || a.vi - b.vi);
+  else if (sortMode === 'margin_desc') rows.sort((a,b) => b.margin - a.margin);
+  else if (sortMode === 'margin_asc') rows.sort((a,b) => a.margin - b.margin);
+  else if (sortMode === 'stock_asc') rows.sort((a,b) => (a.v.stock||0) - (b.v.stock||0));
+  else if (sortMode === 'stock_desc') rows.sort((a,b) => (b.v.stock||0) - (a.v.stock||0));
+
+  document.getElementById('prod-count').textContent = `(${totalCount} รายการ / ${Object.keys(db.products).length} กลุ่มสินค้า)`;
+
+  tbl.innerHTML = rows.map(({p,v,vi,effectiveSku,effectiveImage,margin,groupSize}) => {
+    const sizeLabel = groupSize > 1 ? `<span class="text-slate-400">↳</span> ${v.sizeName||'-'}` : (v.sizeName && v.sizeName!=='ปกติ' ? v.sizeName : '');
+    const ownSkuBadge = v.sku ? '<span class="badge bg-indigo-100 text-indigo-700" title="รหัสเฉพาะขนาดนี้ แยกจากสินค้าหลัก">รหัสแยก</span>' : (groupSize>1 ? '<span class="badge bg-slate-100 text-slate-500" title="ใช้รหัสเดียวกับสินค้าหลัก">รหัสร่วม</span>' : '');
+    const ownImgBadge = v.imageUrl ? ' <span class="badge bg-purple-100 text-purple-700" title="รูปเฉพาะขนาดนี้">รูปแยก</span>' : '';
+    return `<tr>
+      <td>${effectiveImage ? `<img src="${effectiveImage}" class="w-8 h-8 rounded object-cover" onerror="this.style.display='none'">` : '📦'}</td>
+      <td><div class="font-bold">${vi===0 ? p.name : ''}</div><div class="text-[11px]">${sizeLabel} ${ownSkuBadge}${ownImgBadge}</div></td>
+      <td class="text-[11px]">${effectiveSku}</td>
+      <td>${formatMoney(v.price||0)}</td>
+      <td>${formatMoney(v.cost||0)}</td>
+      <td class="${margin<0?'text-rose-600':'text-emerald-600'}">${formatMoney(margin)}</td>
+      <td>${v.stock||0}</td>
+      <td class="text-right"><button class="text-indigo-600 font-bold" onclick="openProductModal('${p.id}')">แก้ไข</button>&nbsp;${vi===0 ? `<button class="text-rose-600 font-bold" onclick="deleteProduct('${p.id}')">ลบ</button>` : ''}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="8" class="text-slate-400 text-center py-3">ยังไม่มีสินค้า</td></tr>';
 }
 
 // ============================================================================
@@ -1380,7 +1511,7 @@ async function pushToSupabase() {
   allOk = await pushTable(client, 'product_categories', linkRows, 'product_id,category_id') && allOk;
   const variantRows = [], newlySynced = [];
   productsList.forEach(p => (p.variants||[]).forEach(v => {
-    const row = { id: toUUID(v.id), product_id: toUUID(p.id), variant_name: v.sizeName||'ปกติ', barcode: v.barcode||null, price: roundAmt(v.price), cost_price: roundAmt(v.cost), is_active: !p.isDeleted };
+    const row = { id: toUUID(v.id), product_id: toUUID(p.id), variant_name: v.sizeName||'ปกติ', barcode: v.barcode||null, sku: v.sku||null, image_url: v.imageUrl||null, price: roundAmt(v.price), cost_price: roundAmt(v.cost), is_active: !p.isDeleted };
     if (!v._stockSynced) { row.stock_quantity = roundStock(v.stock||0); newlySynced.push(v); }
     variantRows.push(row);
   }));
@@ -1414,7 +1545,7 @@ async function pullFromSupabase() {
   db.categories = cats.map(c => ({ id: c.id, name: c.name, icon: c.icon, color: c.color }));
   db.products = {};
   prods.forEach(p => { db.products[p.id] = { id: p.id, code: p.sku, name: p.name, imageUrl: p.image_url, cat: (p.product_categories||[]).map(pc => catIdToName[pc.category_id]).filter(Boolean),
-    variants: (p.product_variants||[]).map(v => ({ id: v.id, sizeName: v.variant_name, barcode: v.barcode, price: v.price, cost: v.cost_price, stock: v.stock_quantity, minStock: p.min_stock_alert, _stockSynced: true,
+    variants: (p.product_variants||[]).map(v => ({ id: v.id, sizeName: v.variant_name, barcode: v.barcode, sku: v.sku||'', imageUrl: v.image_url||null, price: v.price, cost: v.cost_price, stock: v.stock_quantity, minStock: p.min_stock_alert, _stockSynced: true,
       fractions: (v.product_fractions||[]).map(f => ({ id: f.id, fractionName: f.fraction_name, quantityRatio: f.quantity_ratio, price: f.price, barcode: f.barcode })) })) }; });
   db.customers = {}; custs.forEach(c => db.customers[c.id] = { id: c.id, name: c.name, phone: c.phone, address: c.address, creditLimit: c.credit_limit, debt: c.debt });
   db.suppliers = {}; sups.forEach(s => db.suppliers[s.id] = { name: s.name, phone: s.phone, address: s.address });
