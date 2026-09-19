@@ -1517,11 +1517,23 @@ function importBackup() {
 // ============================================================================
 // 19. SYNC ENGINE (push/pull ทุกตาราง — log แจ้งสาเหตุจริงครบทุกครั้ง)
 // ============================================================================
-async function pushTable(client, tableName, rows, onConflict) {
-  if (!rows.length) { log('info', `${tableName}: ไม่มีข้อมูลให้ส่ง (ข้าม)`); return true; }
+async function pushTable(client, tableName, rows, onConflict, opts) {
+  opts = opts || {};
+  const label = opts.label || tableName;
+  if (!rows.length) { log('info', `${label}: ไม่มีข้อมูลให้ส่ง (ข้าม)`); return true; }
   const { error } = await client.from(tableName).upsert(rows, { onConflict });
-  if (error) { log('err', `${tableName}: ${fmtErr(error)}`); return false; }
-  log('ok', `${tableName}: ส่ง ${rows.length} แถวสำเร็จ`); return true;
+  if (error) {
+    // เชื่อมต่อขัดข้องชั่วคราว (เช่น wifi หลุดแวบเดียว) มักโผล่มาเป็น "TypeError: Load failed" หรือ
+    // "Failed to fetch" — ไม่ใช่ error จากฐานข้อมูลจริง ลองส่งซ้ำให้อัตโนมัติอีก 1 ครั้งก่อนจะฟันธงว่าพัง
+    const isNetworkErr = /load failed|failed to fetch|network/i.test(error.message || '');
+    if (isNetworkErr && !opts._retried) {
+      log('info', `${label}: การเชื่อมต่อขัดข้องชั่วคราว — ลองส่งใหม่อีกครั้ง...`);
+      await new Promise(r => setTimeout(r, 1200));
+      return pushTable(client, tableName, rows, onConflict, { label, _retried: true });
+    }
+    log('err', `${label}: ${fmtErr(error)}`); return false;
+  }
+  log('ok', `${label}: ส่ง ${rows.length} แถวสำเร็จ`); return true;
 }
 async function pushToSupabase() {
   switchPage('log');
@@ -1538,15 +1550,21 @@ async function pushToSupabase() {
   const nameToId = {}; db.categories.forEach(c => nameToId[c.name]=c.id);
   const linkRows = []; productsList.forEach(p => (p.cat||[]).forEach(cName => { if (nameToId[cName]) linkRows.push({ product_id: toUUID(p.id), category_id: toUUID(nameToId[cName]) }); }));
   allOk = await pushTable(client, 'product_categories', linkRows, 'product_id,category_id') && allOk;
-  const variantRows = [], newlySynced = [];
+  // สำคัญ: ต้องแยกเป็น 2 ชุดที่ "รูปแบบคอลัมน์เหมือนกันทั้งชุด" ห้ามส่งรวมกันในคำสั่งเดียว —
+  // ถ้าขนาดหนึ่งมี stock_quantity แต่อีกขนาดในชุดเดียวกันไม่มี (เพราะ sync ไปแล้วก่อนหน้านี้และ
+  // ตั้งใจไม่ส่งซ้ำเพื่อกันเขียนทับสต็อกล่าสุดบนคลาวด์) Supabase upsert หลายแถวพร้อมกันจะมองว่า
+  // แถวที่ "ไม่มีคีย์นี้" ตั้งใจส่งเป็น NULL จริงๆ (ไม่ใช่ปล่อยให้ใช้ค่า default ของคอลัมน์) ทำให้ชน
+  // not-null constraint ทันทีที่มีการนำเข้าสินค้าใหม่จำนวนมากพร้อมกับสินค้าเดิมที่เคยซิงค์ไปแล้ว
+  const variantRowsNew = [], variantRowsExisting = [], newlySynced = [];
   productsList.forEach(p => (p.variants||[]).forEach(v => {
-    const row = { id: toUUID(v.id), product_id: toUUID(p.id), variant_name: v.sizeName||'ปกติ', barcode: v.barcode||null, sku: v.sku||null, image_url: v.imageUrl||null, price: roundAmt(v.price), cost_price: roundAmt(v.cost), is_active: !p.isDeleted };
-    if (!v._stockSynced) { row.stock_quantity = roundStock(v.stock||0); newlySynced.push(v); }
-    variantRows.push(row);
+    const base = { id: toUUID(v.id), product_id: toUUID(p.id), variant_name: v.sizeName||'ปกติ', barcode: v.barcode||null, sku: v.sku||null, image_url: v.imageUrl||null, price: roundAmt(v.price), cost_price: roundAmt(v.cost), is_active: !p.isDeleted };
+    if (!v._stockSynced) { variantRowsNew.push({ ...base, stock_quantity: roundStock(v.stock||0) }); newlySynced.push(v); }
+    else variantRowsExisting.push(base);
   }));
-  const variantsOk = await pushTable(client, 'product_variants', variantRows, 'id');
-  if (variantsOk) newlySynced.forEach(v => v._stockSynced = true);
-  allOk = variantsOk && allOk;
+  const variantsOkNew = await pushTable(client, 'product_variants', variantRowsNew, 'id', { label: 'product_variants (รายการใหม่ + สต็อกยกมา)' });
+  const variantsOkExisting = await pushTable(client, 'product_variants', variantRowsExisting, 'id', { label: 'product_variants (รายการเดิม)' });
+  if (variantsOkNew) newlySynced.forEach(v => v._stockSynced = true);
+  allOk = variantsOkNew && variantsOkExisting && allOk;
   const fractionRows = []; productsList.forEach(p => (p.variants||[]).forEach(v => (v.fractions||[]).forEach(f => fractionRows.push({ id: toUUID(f.id), variant_id: toUUID(v.id), fraction_name: f.fractionName, quantity_ratio: f.quantityRatio||1, price: roundAmt(f.price), barcode: f.barcode||null }))));
   allOk = await pushTable(client, 'product_fractions', fractionRows, 'id') && allOk;
   const customerRows = Object.values(db.customers).map(c => ({ id: toUUID(c.id), name: c.name, phone: c.phone||null, address: c.address||'', credit_limit: roundAmt(c.creditLimit||0) }));
@@ -1554,7 +1572,7 @@ async function pushToSupabase() {
   const supplierRows = Object.entries(db.suppliers).map(([key,s]) => ({ id: toUUID(key), name: s.name, phone: s.phone||null, address: s.address||'' }));
   allOk = await pushTable(client, 'suppliers', supplierRows, 'id') && allOk;
   persist();
-  if (allOk) log('ok', '🎉 ซิงค์ทั้งหมดสำเร็จ'); else log('err', 'ซิงค์บางตารางไม่สำเร็จ — ดู log สีแดงด้านบนว่าตารางไหน/สาเหตุอะไรกันแน่');
+  if (allOk) log('ok', '🎉 ซิงค์ทั้งหมดสำเร็จ'); else log('err', 'ซิงค์บางตารางไม่สำเร็จ — ดู log สีแดงด้านบนว่าตารางไหน/สาเหตุอะไรกันแน่ (ลองกด "บังคับซิงค์ทันที" ซ้ำอีกครั้งได้ — ตารางที่เคยสำเร็จแล้วจะไม่เสียหายจากการส่งซ้ำ)');
 }
 async function pullFromSupabase() {
   switchPage('log');
