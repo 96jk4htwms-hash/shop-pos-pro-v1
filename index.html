@@ -37,6 +37,20 @@
   .pin-dot{width:14px;height:14px;border-radius:999px;border:2px solid #4f46e5;}
   .pin-dot.filled{background:#4f46e5;}
   @media print { body *{visibility:hidden;} #receipt-print, #receipt-print *{visibility:visible;} #receipt-print{position:absolute;left:0;top:0;width:280px;} }
+
+  /* ---- ตะกร้าแบบซ่อน/แสดงบนมือถือ (เหลือพื้นที่หน้าจอเลือกสินค้าเต็มๆ แล้วดึงตะกร้าขึ้นมาเมื่อจำเป็น) ---- */
+  #mobile-cart-bar{display:none;position:fixed;left:12px;right:12px;bottom:12px;z-index:46;background:#4f46e5;color:#fff;border-radius:1rem;box-shadow:0 8px 20px rgba(79,70,229,.4);padding:.8rem 1.1rem;align-items:center;justify-content:space-between;font-weight:700;font-size:.82rem;cursor:pointer;}
+  #cart-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:45;}
+  @media (max-width: 767px) {
+    #page-pos #cart-card{display:none;margin:0;}
+    #page-pos #cart-card.cart-mobile-open{
+      display:block;position:fixed;left:0;right:0;bottom:0;z-index:47;
+      max-height:78vh;overflow-y:auto;border-radius:1.1rem 1.1rem 0 0;
+      box-shadow:0 -8px 28px rgba(15,23,42,.28);
+    }
+    #page-pos #mobile-cart-bar{display:flex;}
+    #page-pos #cart-backdrop.cart-mobile-open{display:block;}
+  }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen pb-6">
@@ -106,14 +120,15 @@
       <input id="prod-search" placeholder="ค้นหาสินค้า / บาร์โค้ด..." oninput="renderProductGrid()" onkeydown="if(event.key==='Enter')trySearchBarcode()">
       <button class="btn btn-ghost" onclick="openScanner('pos')">📷</button>
     </div>
-    <div id="product-grid" class="grid grid-cols-3 gap-2 max-h-[60vh] overflow-y-auto"></div>
+    <div id="product-grid" class="grid grid-cols-3 gap-2 max-h-[60vh] overflow-y-auto pb-16 md:pb-0"></div>
   </div>
-  <div class="card">
+  <div id="cart-card" class="card">
     <div class="flex justify-between items-center mb-2">
       <h2 class="font-bold text-sm">ตะกร้า</h2>
       <div class="flex gap-1">
         <button class="btn btn-ghost text-[10px] py-1 px-2" onclick="holdCurrentBill()">⏸ พักบิล (<span id="held-count">0</span>)</button>
         <button class="btn btn-ghost text-[10px] py-1 px-2" onclick="clearCart()">ล้าง</button>
+        <button class="btn btn-ghost text-[10px] py-1 px-2 md:hidden" onclick="closeMobileCart()">✕ ปิด</button>
       </div>
     </div>
     <div id="held-list" class="mb-2"></div>
@@ -123,7 +138,16 @@
     </div>
     <button class="btn btn-emerald w-full mt-2" onclick="openCheckoutModal()">💳 ชำระเงิน</button>
   </div>
+
+  <!-- มือถือเท่านั้น: แถบตะกร้าลอย กดเพื่อเปิด/ปิดแผงตะกร้า (ไม่ต้องเลื่อนจอลงไปหาตะกร้า) -->
+  <div id="cart-backdrop" onclick="closeMobileCart()"></div>
+  <div id="mobile-cart-bar" onclick="toggleMobileCart()">
+    <span>🛒 <span id="mobile-cart-count">0</span> รายการ</span>
+    <span id="mobile-cart-total">฿0.00</span>
+    <span id="mobile-cart-chevron">▲</span>
+  </div>
 </div>
+
 
 <!-- ============================================================================
      PAGE: PRODUCTS
@@ -142,6 +166,7 @@
       <option value="stock_asc">เรียง: สต็อกน้อย→มาก</option>
       <option value="stock_desc">เรียง: สต็อกมาก→น้อย</option>
     </select>
+    <button class="btn btn-amber" onclick="findAndRemoveDuplicateProducts()">🧹 ล้างสินค้าชื่อซ้ำ</button>
   </div>
   <table><thead><tr><th></th><th>สินค้า / ขนาด</th><th>รหัส</th><th>ราคา</th><th>ทุน</th><th>ส่วนต่าง</th><th>สต็อก</th><th></th></tr></thead><tbody id="tbl-products"></tbody></table>
   <h3 class="font-bold text-sm mt-4 mb-2">หมวดหมู่</h3>
@@ -628,6 +653,7 @@ function switchPage(name) {
   if (name === 'reports') renderReports();
   if (name === 'purchasing') populateAdjustVariants();
   if (name === 'settings') { document.getElementById('cfg-url').value = localStorage.getItem('pos2_url')||''; document.getElementById('cfg-key').value = localStorage.getItem('pos2_key')||''; refreshAuthStatus(); }
+  if (name !== 'pos') closeMobileCart();
 }
 
 // ============================================================================
@@ -954,6 +980,42 @@ async function uploadVariantImageIfNeeded(pid, variant, previewDataUrl) {
 function deleteProduct(id) { if (!confirm('ลบสินค้านี้?')) return; delete db.products[id]; persist(); renderAll(); renderProductGrid(); }
 
 // ============================================================================
+// 7b. ล้างสินค้าที่ชื่อซ้ำกัน (เช่น กรณีนำเข้าไฟล์เดิมซ้ำแล้วสินค้าเบิ้ลกัน)
+// ----------------------------------------------------------------------------
+// เก็บไว้ 1 รายการต่อชื่อ — เลือกตัวที่ "สมบูรณ์กว่า" ไว้ก่อน (มีรูปสินค้า > มีสต็อกรวมมากกว่า >
+// เป็นตัวที่เก่ากว่า/นำเข้าก่อน) หมายเหตุ: ลบแค่ในเครื่องนี้เท่านั้น ถ้าเคยกด "บังคับซิงค์ทันที" ตอน
+// ที่ข้อมูลซ้ำอยู่แล้ว ของซ้ำอาจขึ้นไปอยู่บน Supabase ด้วย ต้องลบฝั่งคลาวด์แยกต่างหาก
+// ============================================================================
+function findAndRemoveDuplicateProducts() {
+  const groups = {};
+  Object.values(db.products).forEach(p => {
+    const key = (p.name||'').trim();
+    if (!key) return;
+    (groups[key] = groups[key] || []).push(p);
+  });
+  const dupGroups = Object.values(groups).filter(g => g.length > 1);
+  if (!dupGroups.length) return log('ok', 'ไม่พบสินค้าชื่อซ้ำกันเลย');
+  const totalExtra = dupGroups.reduce((s,g) => s + (g.length - 1), 0);
+  if (!confirm(`พบสินค้าชื่อซ้ำกัน ${dupGroups.length} ชื่อ (รวมรายการซ้ำส่วนเกิน ${totalExtra} รายการ)\nจะเก็บไว้ชื่อละ 1 รายการ (เลือกตัวที่มีรูป/มีสต็อกมากกว่าไว้ก่อน) แล้วลบส่วนที่เหลือ — ดำเนินการต่อ?`)) return;
+  switchPage('log');
+  let removed = 0;
+  dupGroups.forEach(group => {
+    const totalStock = p => (p.variants||[]).reduce((s,v) => s + (parseFloat(v.stock)||0), 0);
+    const sorted = group.slice().sort((a,b) => {
+      if (!!b.imageUrl - !!a.imageUrl !== 0) return (!!b.imageUrl) - (!!a.imageUrl);
+      if (totalStock(b) !== totalStock(a)) return totalStock(b) - totalStock(a);
+      return 0; // เดิมเรียงตามลำดับที่พบก่อน (เก่ากว่า) อยู่แล้ว
+    });
+    const keep = sorted[0];
+    sorted.slice(1).forEach(p => { delete db.products[p.id]; removed++; });
+    log('info', `"${keep.name}": เก็บรหัส "${keep.code}" ไว้ 1 รายการ (ลบซ้ำออก ${sorted.length - 1} รายการ)`);
+  });
+  persist(); renderAll(); renderProductGrid();
+  log('ok', `🎉 ล้างสินค้าซ้ำเสร็จสิ้น — ลบไปทั้งหมด ${removed} รายการ (เหลือสินค้า ${Object.keys(db.products).length} รายการ)`);
+  log('info', 'หมายเหตุ: นี่ลบแค่ในเครื่องนี้เท่านั้น — ถ้าเคยกด "บังคับซิงค์ทันที" ตอนข้อมูลซ้ำอยู่แล้ว ของซ้ำอาจขึ้นคลาวด์ไปด้วย ต้องลบฝั่ง Supabase แยกต่างหาก (ไม่ควรกด "ดึงข้อมูลจากคลาวด์" ตอนนี้ ไม่งั้นของซ้ำจะไหลกลับเข้ามาอีก จนกว่าจะเคลียร์ฝั่งคลาวด์เสร็จก่อน)');
+}
+
+// ============================================================================
 // 8. CUSTOMERS / SUPPLIERS
 // ============================================================================
 function openCustomerModal(id) {
@@ -1166,6 +1228,29 @@ function renderCart() {
       <div class="flex items-center gap-1"><button class="btn btn-ghost px-2 py-0.5" onclick="changeQty(${idx},-1)">−</button><span class="w-6 text-center">${i.qty}</span><button class="btn btn-ghost px-2 py-0.5" onclick="changeQty(${idx},1)">+</button></div>
     </div>`).join('') || '<div class="text-slate-400 text-center py-3">ตะกร้าว่าง</div>';
   document.getElementById('cart-total').textContent = formatMoney(cartTotal());
+  updateMobileCartBar();
+}
+// ---- ตะกร้าซ่อน/แสดงบนมือถือ ----
+function updateMobileCartBar() {
+  const countEl = document.getElementById('mobile-cart-count'), totalEl = document.getElementById('mobile-cart-total');
+  if (!countEl) return; // อยู่นอกหน้า pos ตอนนี้ (เช่นตอนยังโหลดไม่ครบ) ข้ามไปเงียบๆ
+  countEl.textContent = cart.reduce((s,i) => s + (i.qty||0), 0);
+  totalEl.textContent = formatMoney(cartTotal());
+}
+function toggleMobileCart() {
+  const cartCard = document.getElementById('cart-card');
+  if (cartCard.classList.contains('cart-mobile-open')) closeMobileCart(); else openMobileCart();
+}
+function openMobileCart() {
+  document.getElementById('cart-card').classList.add('cart-mobile-open');
+  document.getElementById('cart-backdrop').classList.add('cart-mobile-open');
+  document.getElementById('mobile-cart-chevron').textContent = '▼';
+}
+function closeMobileCart() {
+  const cartCard = document.getElementById('cart-card'); if (!cartCard) return;
+  cartCard.classList.remove('cart-mobile-open');
+  document.getElementById('cart-backdrop').classList.remove('cart-mobile-open');
+  const chev = document.getElementById('mobile-cart-chevron'); if (chev) chev.textContent = '▲';
 }
 function holdCurrentBill() {
   if (!cart.length) return log('err', 'ตะกร้าว่างเปล่า');
@@ -1225,6 +1310,7 @@ function setPayMethod(m) {
 function openCheckoutModal() {
   if (!cart.length) return log('err', 'ตะกร้าว่างเปล่า');
   if (!db.currentShift) return log('err', 'ยังไม่ได้เปิดร้าน — เปิดร้านก่อนขาย');
+  closeMobileCart();
   const sel = document.getElementById('checkout-customer');
   sel.innerHTML = Object.values(db.customers).map(c => `<option value="${c.id}">${c.name} (หนี้ ${formatMoney(c.debt||0)})</option>`).join('') || '<option value="">ยังไม่มีลูกค้า</option>';
   document.getElementById('checkout-total').textContent = formatMoney(cartTotal());
@@ -1574,19 +1660,36 @@ async function pushToSupabase() {
   persist();
   if (allOk) log('ok', '🎉 ซิงค์ทั้งหมดสำเร็จ'); else log('err', 'ซิงค์บางตารางไม่สำเร็จ — ดู log สีแดงด้านบนว่าตารางไหน/สาเหตุอะไรกันแน่ (ลองกด "บังคับซิงค์ทันที" ซ้ำอีกครั้งได้ — ตารางที่เคยสำเร็จแล้วจะไม่เสียหายจากการส่งซ้ำ)');
 }
+// Supabase/PostgREST จำกัดจำนวนแถวต่อคำขอไว้ที่ 1000 แถวโดยดีฟอลต์ (ปรับได้ที่ฝั่งโปรเจกต์ แต่ส่วน
+// ใหญ่ตั้งไว้ที่ 1000) ถ้าสินค้ามีมากกว่านั้น (เช่น นำเข้าทีเดียว 2000 รายการ) การ .select() เฉยๆ
+// โดยไม่แบ่งหน้าจะได้กลับมาแค่ 1000 แถวแรกแบบเงียบๆ ไม่มี error ใดๆ เตือน — ทำให้ pull ทับข้อมูล
+// ในเครื่องด้วยชุดข้อมูลที่ไม่ครบ (สินค้าหายไปครึ่งหนึ่งอย่างที่เจอ) ฟังก์ชันนี้วนดึงทีละหน้าจนกว่า
+// จะได้ครบทุกแถวจริง — ต้อง .order() ด้วยคอลัมน์ที่ไม่ซ้ำกัน (เช่น id) เพื่อให้การแบ่งหน้าคงที่แน่นอน
+async function fetchAllRows(client, tableName, selectStr, orderCol) {
+  const PAGE = 1000;
+  let all = [], from = 0;
+  while (true) {
+    const { data, error } = await client.from(tableName).select(selectStr).order(orderCol || 'id').range(from, from + PAGE - 1);
+    if (error) return { data: null, error };
+    all = all.concat(data || []);
+    if (!data || data.length < PAGE) break;
+    from += PAGE;
+  }
+  return { data: all, error: null };
+}
 async function pullFromSupabase() {
   switchPage('log');
   const client = getClient(); if (!client) return log('err', 'ยังไม่ได้เชื่อมต่อ Supabase');
   const { data: { session } } = await client.auth.getSession();
   if (!session?.user) return log('err', 'ยังไม่ได้เข้าสู่ระบบร้านค้า');
   log('info', 'เริ่มดึงข้อมูลจากคลาวด์...');
-  const { data: cats, error: catErr } = await client.from('categories').select('*').order('display_order');
+  const { data: cats, error: catErr } = await fetchAllRows(client, 'categories', '*', 'display_order');
   if (catErr) return log('err', `categories: ${fmtErr(catErr)}`);
-  const { data: prods, error: prodErr } = await client.from('products').select('*, product_variants(*, product_fractions(*)), product_categories(category_id)');
+  const { data: prods, error: prodErr } = await fetchAllRows(client, 'products', '*, product_variants(*, product_fractions(*)), product_categories(category_id)', 'id');
   if (prodErr) return log('err', `products: ${fmtErr(prodErr)}`);
-  const { data: custs, error: custErr } = await client.from('customers').select('*');
+  const { data: custs, error: custErr } = await fetchAllRows(client, 'customers', '*', 'id');
   if (custErr) return log('err', `customers: ${fmtErr(custErr)}`);
-  const { data: sups, error: supErr } = await client.from('suppliers').select('*');
+  const { data: sups, error: supErr } = await fetchAllRows(client, 'suppliers', '*', 'id');
   if (supErr) return log('err', `suppliers: ${fmtErr(supErr)}`);
   const catIdToName = {}; cats.forEach(c => catIdToName[c.id]=c.name);
   db.categories = cats.map(c => ({ id: c.id, name: c.name, icon: c.icon, color: c.color }));
@@ -1641,14 +1744,20 @@ function ensureGeneralCategory() {
 }
 function startProductImport() {
   if (!_importRows || !_importRows.length) return log('err', 'ยังไม่ได้เลือกไฟล์ หรือไฟล์ไม่มีรายการสินค้า');
-  if (!confirm(`ยืนยันนำเข้าสินค้า ${_importRows.length} รายการเข้าระบบ? (จะเพิ่มเป็นสินค้าใหม่ทั้งหมด ไม่ทับของเดิม)`)) return;
+  if (!confirm(`ยืนยันนำเข้าสินค้า ${_importRows.length} รายการเข้าระบบ? (รายการที่ชื่อตรงกับสินค้าที่มีอยู่แล้วจะถูกข้าม ไม่สร้างซ้ำ)`)) return;
   switchPage('log');
   const generalCat = ensureGeneralCategory();
   const usedSkus = collectUsedSkus(null);
-  let ok = 0, renamedSku = 0, skipped = 0;
+  // กันนำเข้าซ้ำซ้อน: จับคู่ด้วย "ชื่อสินค้า" (ตรงตัว) กับสินค้าที่มีอยู่แล้วในเครื่องตอนนี้ — ใช้ชื่อ
+  // แทนรหัส SKU เพราะถ้าเคยนำเข้าไฟล์นี้มาก่อนแล้วรหัสชนจนถูกเปลี่ยนอัตโนมัติ (ดู renamedSku ด้านล่าง)
+  // การเช็คซ้ำด้วยรหัสเดิมจากไฟล์จะจับไม่ได้ว่าเคยนำเข้าไปแล้ว ทำให้นำเข้าซ้ำอีกรอบ (บั๊กที่เจอจริง
+  // ตอนกดนำเข้าไฟล์เดิมซ้ำหลัง pull ข้อมูลมาไม่ครบ)
+  const existingByName = new Set(Object.values(db.products).map(p => p.name.trim()));
+  let ok = 0, renamedSku = 0, skipped = 0, dup = 0;
   _importRows.forEach((r, idx) => {
     const name = String(r[0]||'').trim();
     if (!name) { skipped++; return; }
+    if (existingByName.has(name)) { dup++; return; }
     let sku = String(r[1]||'').trim();
     const cost = parseFloat(r[4]) || 0;
     const price = parseFloat(r[5]) || 0;
@@ -1661,6 +1770,7 @@ function startProductImport() {
       log('info', `แถวที่ ${idx+2}: รหัส "${original}" ถูกใช้ไปแล้ว — เปลี่ยนเป็น "${sku}" แทน (แก้เองภายหลังได้ที่หน้าสินค้า)`);
     }
     usedSkus.set(sku.toLowerCase(), `นำเข้า "${name}"`);
+    existingByName.add(name);
     const pid = 'p-import-' + Date.now() + '-' + idx;
     db.products[pid] = {
       id: pid, name, code: sku, imageUrl: null, cat: [generalCat],
@@ -1669,7 +1779,7 @@ function startProductImport() {
     ok++;
   });
   persist(); renderAll(); renderProductGrid();
-  log('ok', `🎉 นำเข้าสินค้าสำเร็จ ${ok} รายการ (เปลี่ยนรหัสให้อัตโนมัติ ${renamedSku} รายการเพราะรหัสชนกัน, ข้าม ${skipped} แถวที่ไม่มีชื่อสินค้า)`);
+  log('ok', `🎉 นำเข้าสินค้าสำเร็จ ${ok} รายการ (ข้ามเพราะมีชื่อซ้ำกับสินค้าที่มีอยู่แล้ว ${dup} รายการ, เปลี่ยนรหัสให้อัตโนมัติ ${renamedSku} รายการเพราะรหัสชนกัน, ข้าม ${skipped} แถวที่ไม่มีชื่อสินค้า)`);
   log('info', 'อย่าลืมกด "⬆️ บังคับซิงค์ทันที" ด้านบนเพื่อส่งสินค้าที่นำเข้าขึ้น Supabase ด้วย (ถ้าเชื่อมต่อไว้แล้ว)');
   _importRows = null; document.getElementById('import-products-file').value = ''; document.getElementById('import-products-preview').textContent = '';
 }
