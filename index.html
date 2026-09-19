@@ -270,6 +270,35 @@
   <button id="signout-btn" class="btn btn-ghost hidden mt-2" onclick="doSignOut()">ออกจากระบบ</button>
   <button class="btn btn-primary w-full mt-3" onclick="pushToSupabase()">⬆️ บังคับซิงค์ทันที</button>
   <button class="btn btn-ghost w-full mt-2" onclick="pullFromSupabase()">⬇️ ดึงข้อมูลจากคลาวด์</button>
+
+  <h2 class="font-bold text-sm mb-2 mt-5 pt-4 border-t">📥 ยกยอด &amp; นำเข้าไฟล์ (สินค้า)</h2>
+  <p class="text-[10px] text-slate-500 mb-2">
+    นำเข้าสินค้าจากไฟล์ Excel (.xlsx) ที่มีคอลัมน์ ชื่อสินค้า / SKU / ขนาด / หมวดหมู่ / ราคาทุน / ราคาขาย / ยอดยกมา / ไฟล์รูปภาพ —
+    ระบบจะอ่านเฉพาะ ชื่อสินค้า / SKU / ราคาทุน / ราคาขาย / ยอดยกมา โดยอัตโนมัติ ส่วน "หมวดหมู่" และ "ขนาด" เป็นข้อมูลอ้างอิงเท่านั้น
+    (สินค้าทุกชิ้นจะถูกใส่ในหมวด "งานทั่วไป" ก่อนเสมอ ต้องเข้าไปแก้หมวดหมู่ทีละสินค้าที่หน้าคลังสินค้าเองภายหลัง)
+  </p>
+  <input type="file" id="import-products-file" accept=".xlsx,.xls" class="mb-2">
+  <div id="import-products-preview" class="text-xs mb-2"></div>
+  <button class="btn btn-primary w-full" onclick="startProductImport()">📥 เริ่มนำเข้าสินค้า</button>
+
+  <h2 class="font-bold text-sm mb-2 mt-5 pt-4 border-t">🖼️ นำเข้ารูป (ชุด)</h2>
+  <p class="text-[10px] text-slate-500 mb-2">
+    จับคู่รูปภาพเข้ากับสินค้าที่นำเข้าไว้แล้ว (จับคู่จาก "ชื่อสินค้า" ให้ตรงกับที่นำเข้าไว้ก่อนหน้านี้) —
+    ต้องเชื่อมต่อ + เข้าสู่ระบบ Supabase ก่อน เพราะรูปจะถูกอัปโหลดขึ้น Supabase Storage โดยตรง
+    (ไฟล์รูปหลายพันไฟล์เก็บเป็น base64 ในเครื่องอย่างเดียวจะทำให้พื้นที่เก็บข้อมูลของเบราว์เซอร์เต็มและแอปพังได้)
+  </p>
+  <div class="grid gap-2 mb-2">
+    <div>
+      <label class="text-[10px] text-slate-500">1) ไฟล์ image_mapping.json</label>
+      <input type="file" id="import-image-mapping-file" accept=".json">
+    </div>
+    <div>
+      <label class="text-[10px] text-slate-500">2) ไฟล์รูปภาพทั้งหมดในโฟลเดอร์ images/ (เลือกพร้อมกันทีเดียว)</label>
+      <input type="file" id="import-image-files" accept="image/*" multiple>
+    </div>
+  </div>
+  <div id="import-images-preview" class="text-xs mb-2"></div>
+  <button class="btn btn-primary w-full" onclick="startBulkImageImport()">🖼️ เริ่มนำเข้ารูป</button>
 </div>
 
 <!-- ============================================================================
@@ -1551,6 +1580,155 @@ async function pullFromSupabase() {
   db.suppliers = {}; sups.forEach(s => db.suppliers[s.id] = { name: s.name, phone: s.phone, address: s.address });
   persist(); renderAll(); renderProductGrid();
   log('ok', `🎉 ดึงข้อมูลสำเร็จ: หมวดหมู่ ${cats.length} / สินค้า ${prods.length} / ลูกค้า ${custs.length} / ซัพพลายเออร์ ${sups.length}`);
+}
+
+// ============================================================================
+// 21. นำเข้าสินค้าจากไฟล์ Excel (ยกยอด / นำเข้าสินค้าใหม่)
+// ----------------------------------------------------------------------------
+// อ่านเฉพาะคอลัมน์ ชื่อสินค้า / SKU / ราคาทุน / ราคาขาย / ยอดยกมา ตามที่ระบุไว้ในไฟล์
+// "วิธีใช้" ที่มาพร้อมชุดไฟล์นำเข้า — คอลัมน์ "หมวดหมู่" กับ "ขนาด" เป็นข้อมูลอ้างอิงเท่านั้น
+// (ไม่ได้ใช้ตอนนำเข้าอัตโนมัติ) สินค้าทุกชิ้นเข้าหมวด "งานทั่วไป" ก่อนเสมอ ไปแก้ทีละชิ้นทีหลังได้
+// ============================================================================
+let _importRows = null;
+document.getElementById('import-products-file').addEventListener('change', onProductImportFileChosen);
+function onProductImportFileChosen(evt) {
+  const file = evt.target.files[0];
+  _importRows = null;
+  document.getElementById('import-products-preview').textContent = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array' });
+      const sheetName = wb.SheetNames.find(n => n.indexOf('รายการสินค้า') !== -1) || wb.SheetNames[0];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: '' });
+      // แถวแรก = หัวตาราง (ชื่อสินค้า/SKU/ขนาด/หมวดหมู่/ราคาทุน/ราคาขาย/ยอดยกมา/ไฟล์รูปภาพ) — ข้ามไป
+      // แถว "ตัวอย่าง:" (แถวตัวอย่างสาธิตในไฟล์ต้นแบบ) — ข้ามไปด้วย ไม่ใช่สินค้าจริง
+      const dataRows = rows.slice(1).filter(r => r[0] && String(r[0]).trim() && !String(r[0]).trim().startsWith('ตัวอย่าง'));
+      _importRows = dataRows;
+      const withSku = dataRows.filter(r => String(r[1]||'').trim()).length;
+      document.getElementById('import-products-preview').innerHTML =
+        `พบสินค้า <b>${dataRows.length}</b> รายการในไฟล์ (มี SKU ${withSku} / ไม่มี SKU ${dataRows.length-withSku} — จะสุ่มรหัสให้อัตโนมัติ)<br>` +
+        `ทุกรายการจะเข้าหมวด "งานทั่วไป" ก่อน — คอลัมน์หมวดหมู่/ขนาดในไฟล์เก็บไว้เป็นข้อมูลอ้างอิงในชื่อสินค้าแทน ต้องไปจัดหมวดเองทีหลัง`;
+    } catch (err) {
+      log('err', `อ่านไฟล์ไม่สำเร็จ: ${err.message}`);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+function ensureGeneralCategory() {
+  let cat = db.categories.find(c => c.name === 'งานทั่วไป');
+  if (!cat) { cat = { id: 'cat-general-' + Date.now(), name: 'งานทั่วไป', icon: '📦', color: '#64748b' }; db.categories.push(cat); }
+  return cat.name;
+}
+function startProductImport() {
+  if (!_importRows || !_importRows.length) return log('err', 'ยังไม่ได้เลือกไฟล์ หรือไฟล์ไม่มีรายการสินค้า');
+  if (!confirm(`ยืนยันนำเข้าสินค้า ${_importRows.length} รายการเข้าระบบ? (จะเพิ่มเป็นสินค้าใหม่ทั้งหมด ไม่ทับของเดิม)`)) return;
+  switchPage('log');
+  const generalCat = ensureGeneralCategory();
+  const usedSkus = collectUsedSkus(null);
+  let ok = 0, renamedSku = 0, skipped = 0;
+  _importRows.forEach((r, idx) => {
+    const name = String(r[0]||'').trim();
+    if (!name) { skipped++; return; }
+    let sku = String(r[1]||'').trim();
+    const cost = parseFloat(r[4]) || 0;
+    const price = parseFloat(r[5]) || 0;
+    const stock = parseFloat(r[6]) || 0;
+    if (!sku) sku = 'IMP' + Date.now() + idx;
+    if (usedSkus.has(sku.toLowerCase())) {
+      const original = sku;
+      sku = 'IMP-' + sku + '-' + idx;
+      renamedSku++;
+      log('info', `แถวที่ ${idx+2}: รหัส "${original}" ถูกใช้ไปแล้ว — เปลี่ยนเป็น "${sku}" แทน (แก้เองภายหลังได้ที่หน้าสินค้า)`);
+    }
+    usedSkus.set(sku.toLowerCase(), `นำเข้า "${name}"`);
+    const pid = 'p-import-' + Date.now() + '-' + idx;
+    db.products[pid] = {
+      id: pid, name, code: sku, imageUrl: null, cat: [generalCat],
+      variants: [{ id: 'v-' + Date.now() + '-' + idx, sizeName: 'ปกติ', sku: '', barcode: '', imageUrl: null, price, cost, stock, minStock: 5, fractions: [] }]
+    };
+    ok++;
+  });
+  persist(); renderAll(); renderProductGrid();
+  log('ok', `🎉 นำเข้าสินค้าสำเร็จ ${ok} รายการ (เปลี่ยนรหัสให้อัตโนมัติ ${renamedSku} รายการเพราะรหัสชนกัน, ข้าม ${skipped} แถวที่ไม่มีชื่อสินค้า)`);
+  log('info', 'อย่าลืมกด "⬆️ บังคับซิงค์ทันที" ด้านบนเพื่อส่งสินค้าที่นำเข้าขึ้น Supabase ด้วย (ถ้าเชื่อมต่อไว้แล้ว)');
+  _importRows = null; document.getElementById('import-products-file').value = ''; document.getElementById('import-products-preview').textContent = '';
+}
+
+// ============================================================================
+// 22. นำเข้ารูปภาพแบบชุด (จับคู่จาก image_mapping.json: ชื่อสินค้า -> ชื่อไฟล์รูป)
+// ----------------------------------------------------------------------------
+// รูปอัปโหลดขึ้น Supabase Storage โดยตรง (bucket เดียวกับที่ใช้อยู่แล้ว "product-images")
+// ไม่เก็บเป็น base64 ไว้ในเครื่อง เพราะไฟล์รูปเป็นพันไฟล์จะทำให้ localStorage เต็มและแอปพังได้
+// ต้องนำเข้าสินค้าจากไฟล์ Excel ก่อน (ข้อ 21) ชื่อสินค้าจึงจะตรงกันและจับคู่รูปได้ถูกต้อง
+// ============================================================================
+let _imageMapping = null, _imageFileMap = null;
+document.getElementById('import-image-mapping-file').addEventListener('change', (evt) => {
+  const file = evt.target.files[0]; _imageMapping = null; if (!file) return updateImageImportPreview();
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try { _imageMapping = JSON.parse(e.target.result); log('ok', `อ่าน image_mapping.json สำเร็จ: ${Object.keys(_imageMapping).length} รายการ`); }
+    catch (err) { log('err', `ไฟล์ image_mapping.json ไม่ถูกต้อง: ${err.message}`); _imageMapping = null; }
+    updateImageImportPreview();
+  };
+  reader.readAsText(file);
+});
+document.getElementById('import-image-files').addEventListener('change', (evt) => {
+  _imageFileMap = new Map();
+  Array.from(evt.target.files).forEach(f => _imageFileMap.set(f.name, f));
+  log('ok', `เลือกไฟล์รูปภาพ ${_imageFileMap.size} ไฟล์`);
+  updateImageImportPreview();
+});
+function updateImageImportPreview() {
+  const el = document.getElementById('import-images-preview');
+  if (!_imageMapping || !_imageFileMap) { el.textContent = ''; return; }
+  let matchedProduct = 0, matchedFile = 0;
+  const productsByName = {}; Object.values(db.products).forEach(p => productsByName[p.name] = p);
+  Object.entries(_imageMapping).forEach(([name, fname]) => {
+    if (productsByName[name]) matchedProduct++;
+    if (_imageFileMap.has(fname)) matchedFile++;
+  });
+  el.innerHTML = `รายการใน mapping: ${Object.keys(_imageMapping).length} — ตรงกับสินค้าที่มีอยู่แล้ว: <b>${matchedProduct}</b> — มีไฟล์รูปที่เลือกไว้: <b>${matchedFile}</b><br>` +
+    (matchedProduct < Object.keys(_imageMapping).length ? `<span class="text-amber-600">มีสินค้าที่ยังไม่ตรงกัน — ตรวจว่านำเข้าไฟล์ Excel (ข้อ 21) แล้วหรือยัง ชื่อสินค้าต้องตรงกันเป๊ะ</span>` : '');
+}
+async function uploadOneBulkImage(client, pid, file) {
+  const path = `${pid}_bulkimport_${Date.now()}_${Math.random().toString(36).slice(2,7)}.jpg`;
+  const { error } = await client.storage.from('product-images').upload(path, file, { contentType: file.type || 'image/jpeg', upsert: true });
+  if (error) throw error;
+  const { data } = client.storage.from('product-images').getPublicUrl(path);
+  return data.publicUrl;
+}
+async function startBulkImageImport() {
+  if (!_imageMapping) return log('err', 'ยังไม่ได้เลือกไฟล์ image_mapping.json');
+  if (!_imageFileMap || !_imageFileMap.size) return log('err', 'ยังไม่ได้เลือกไฟล์รูปภาพ');
+  const client = getClient();
+  if (!client) return log('err', 'ยังไม่ได้เชื่อมต่อ Supabase — ไปที่หัวข้อ "เชื่อมต่อ Supabase" ด้านบนก่อน');
+  const { data: { session } } = await client.auth.getSession();
+  if (!session?.user) return log('err', 'ยังไม่ได้เข้าสู่ระบบร้านค้า — ต้องเข้าสู่ระบบก่อนอัปโหลดรูป');
+  switchPage('log');
+  const productsByName = {}; Object.values(db.products).forEach(p => productsByName[p.name] = p);
+  const entries = Object.entries(_imageMapping).filter(([name, fname]) => productsByName[name] && _imageFileMap.has(fname));
+  if (!entries.length) return log('err', 'ไม่พบคู่สินค้า+ไฟล์รูปที่จับคู่ได้เลย — ตรวจว่านำเข้าสินค้าจากไฟล์ Excel แล้วหรือยัง');
+  log('info', `เริ่มอัปโหลดรูป ${entries.length} รูป (จับคู่ได้) — อาจใช้เวลาสักครู่ ห้ามปิดหน้านี้ระหว่างอัปโหลด...`);
+  let ok = 0, fail = 0, done = 0;
+  const CONCURRENCY = 4;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < entries.length) {
+      const i = cursor++; const [name, fname] = entries[i];
+      const p = productsByName[name]; const file = _imageFileMap.get(fname);
+      try {
+        const url = await uploadOneBulkImage(client, p.id, file);
+        p.imageUrl = url; ok++;
+      } catch (err) { fail++; log('err', `"${name}": อัปโหลดรูปไม่สำเร็จ: ${fmtErr(err)}`); }
+      done++;
+      if (done % 50 === 0) { persist(); log('info', `อัปโหลดไปแล้ว ${done}/${entries.length} (สำเร็จ ${ok}, ผิดพลาด ${fail})`); }
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  persist(); renderAll(); renderProductGrid();
+  log('ok', `🎉 นำเข้ารูปเสร็จสิ้น: สำเร็จ ${ok} รูป / ผิดพลาด ${fail} รูป จากทั้งหมด ${entries.length} คู่ที่จับคู่ได้`);
 }
 
 // ============================================================================
