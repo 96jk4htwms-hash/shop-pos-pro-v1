@@ -980,24 +980,24 @@ async function uploadVariantImageIfNeeded(pid, variant, previewDataUrl) {
 function deleteProduct(id) { if (!confirm('ลบสินค้านี้?')) return; delete db.products[id]; persist(); renderAll(); renderProductGrid(); }
 
 // ============================================================================
-// 7b. ล้างสินค้าที่ชื่อซ้ำกัน (เช่น กรณีนำเข้าไฟล์เดิมซ้ำแล้วสินค้าเบิ้ลกัน)
+// 7b. ล้างสินค้าที่ซ้ำกัน (ชื่อซ้ำ หรือ รหัส SKU ซ้ำ) — เช่น กรณีนำเข้าไฟล์เดิมซ้ำ หรือดึงข้อมูล
+// จากคลาวด์มาไม่ครบแล้วนำเข้าซ้ำทับ ทำให้มีทั้งชื่อซ้ำกันเอง และบางคู่ชื่อไม่ตรงกันแต่ดันได้รหัส
+// SKU ชนกัน (เพราะระบบเปลี่ยนรหัสอัตโนมัติตอนชนแล้วดันไปชนกับของอีกใบในคนละรอบนำเข้า) —
+// รหัส SKU ในตาราง products ฝั่ง Supabase เป็น unique เดี่ยว ถ้ามีชนกันจะทำให้ "บังคับซิงค์ทันที"
+// ล้มทั้งชุด (products ไม่เข้า แล้ว product_variants/product_categories ที่อ้างอิงก็พังตามเป็นโดมิโน)
 // ----------------------------------------------------------------------------
-// เก็บไว้ 1 รายการต่อชื่อ — เลือกตัวที่ "สมบูรณ์กว่า" ไว้ก่อน (มีรูปสินค้า > มีสต็อกรวมมากกว่า >
-// เป็นตัวที่เก่ากว่า/นำเข้าก่อน) หมายเหตุ: ลบแค่ในเครื่องนี้เท่านั้น ถ้าเคยกด "บังคับซิงค์ทันที" ตอน
-// ที่ข้อมูลซ้ำอยู่แล้ว ของซ้ำอาจขึ้นไปอยู่บน Supabase ด้วย ต้องลบฝั่งคลาวด์แยกต่างหาก
+// เก็บไว้ 1 รายการต่อกลุ่ม — เลือกตัวที่ "สมบูรณ์กว่า" ไว้ก่อน (มีรูปสินค้า > มีสต็อกรวมมากกว่า)
+// หมายเหตุ: ลบแค่ในเครื่องนี้เท่านั้น ถ้าเคยกด "บังคับซิงค์ทันที" ตอนข้อมูลซ้ำอยู่แล้ว ของซ้ำอาจ
+// ขึ้นไปอยู่บน Supabase ด้วย ต้องลบฝั่งคลาวด์แยกต่างหาก
 // ============================================================================
-function findAndRemoveDuplicateProducts() {
+function _dedupeProductsByKey(keyFn, label) {
   const groups = {};
   Object.values(db.products).forEach(p => {
-    const key = (p.name||'').trim();
+    const key = keyFn(p);
     if (!key) return;
     (groups[key] = groups[key] || []).push(p);
   });
   const dupGroups = Object.values(groups).filter(g => g.length > 1);
-  if (!dupGroups.length) return log('ok', 'ไม่พบสินค้าชื่อซ้ำกันเลย');
-  const totalExtra = dupGroups.reduce((s,g) => s + (g.length - 1), 0);
-  if (!confirm(`พบสินค้าชื่อซ้ำกัน ${dupGroups.length} ชื่อ (รวมรายการซ้ำส่วนเกิน ${totalExtra} รายการ)\nจะเก็บไว้ชื่อละ 1 รายการ (เลือกตัวที่มีรูป/มีสต็อกมากกว่าไว้ก่อน) แล้วลบส่วนที่เหลือ — ดำเนินการต่อ?`)) return;
-  switchPage('log');
   let removed = 0;
   dupGroups.forEach(group => {
     const totalStock = p => (p.variants||[]).reduce((s,v) => s + (parseFloat(v.stock)||0), 0);
@@ -1008,10 +1008,26 @@ function findAndRemoveDuplicateProducts() {
     });
     const keep = sorted[0];
     sorted.slice(1).forEach(p => { delete db.products[p.id]; removed++; });
-    log('info', `"${keep.name}": เก็บรหัส "${keep.code}" ไว้ 1 รายการ (ลบซ้ำออก ${sorted.length - 1} รายการ)`);
+    log('info', `${label} "${keep.name}" (รหัส "${keep.code}"): เก็บไว้ 1 รายการ (ลบซ้ำออก ${sorted.length - 1} รายการ)`);
   });
+  return removed;
+}
+function findAndRemoveDuplicateProducts() {
+  // นับตัวอย่างคร่าวๆ ก่อนถามยืนยัน (นับทั้งจากชื่อซ้ำและรหัสซ้ำ อาจทับกันบ้างแต่พอกะจำนวนได้)
+  const byName = {}, byCode = {};
+  Object.values(db.products).forEach(p => {
+    const n = (p.name||'').trim(); if (n) (byName[n] = byName[n]||[]).push(p);
+    const c = (p.code||'').trim(); if (c) (byCode[c] = byCode[c]||[]).push(p);
+  });
+  const dupNameGroups = Object.values(byName).filter(g => g.length > 1).length;
+  const dupCodeGroups = Object.values(byCode).filter(g => g.length > 1).length;
+  if (!dupNameGroups && !dupCodeGroups) return log('ok', 'ไม่พบสินค้าชื่อซ้ำหรือรหัสซ้ำเลย');
+  if (!confirm(`พบชื่อสินค้าซ้ำ ${dupNameGroups} ชื่อ และรหัส SKU ชนกัน ${dupCodeGroups} รหัส\nจะเก็บไว้กลุ่มละ 1 รายการ (เลือกตัวที่มีรูป/มีสต็อกมากกว่าไว้ก่อน) แล้วลบส่วนที่เหลือ — ดำเนินการต่อ?`)) return;
+  switchPage('log');
+  const removedByName = _dedupeProductsByKey(p => (p.name||'').trim(), 'ชื่อซ้ำ:');
+  const removedByCode = _dedupeProductsByKey(p => (p.code||'').trim(), 'รหัสซ้ำ:');
   persist(); renderAll(); renderProductGrid();
-  log('ok', `🎉 ล้างสินค้าซ้ำเสร็จสิ้น — ลบไปทั้งหมด ${removed} รายการ (เหลือสินค้า ${Object.keys(db.products).length} รายการ)`);
+  log('ok', `🎉 ล้างสินค้าซ้ำเสร็จสิ้น — ลบไปทั้งหมด ${removedByName + removedByCode} รายการ (ชื่อซ้ำ ${removedByName}, รหัสซ้ำ ${removedByCode} — เหลือสินค้า ${Object.keys(db.products).length} รายการ)`);
   log('info', 'หมายเหตุ: นี่ลบแค่ในเครื่องนี้เท่านั้น — ถ้าเคยกด "บังคับซิงค์ทันที" ตอนข้อมูลซ้ำอยู่แล้ว ของซ้ำอาจขึ้นคลาวด์ไปด้วย ต้องลบฝั่ง Supabase แยกต่างหาก (ไม่ควรกด "ดึงข้อมูลจากคลาวด์" ตอนนี้ ไม่งั้นของซ้ำจะไหลกลับเข้ามาอีก จนกว่าจะเคลียร์ฝั่งคลาวด์เสร็จก่อน)');
 }
 
@@ -1762,10 +1778,12 @@ function startProductImport() {
     const cost = parseFloat(r[4]) || 0;
     const price = parseFloat(r[5]) || 0;
     const stock = parseFloat(r[6]) || 0;
-    if (!sku) sku = 'IMP' + Date.now() + idx;
+    if (!sku) sku = 'IMP' + Date.now() + idx + Math.random().toString(36).slice(2,5);
     if (usedSkus.has(sku.toLowerCase())) {
       const original = sku;
-      sku = 'IMP-' + sku + '-' + idx;
+      // ใช้ timestamp+เลขสุ่มแทน idx เฉยๆ กันไม่ให้รอบนำเข้าที่ต่างเวลากันดันได้รหัสสำรองซ้ำกันเป๊ะ
+      // (เคยเป็นสาเหตุให้สินค้าคนละชื่อดันมีรหัส SKU ชนกันจนซิงค์ทั้งชุดพังไปแล้วครั้งหนึ่ง)
+      sku = 'IMP-' + sku + '-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
       renamedSku++;
       log('info', `แถวที่ ${idx+2}: รหัส "${original}" ถูกใช้ไปแล้ว — เปลี่ยนเป็น "${sku}" แทน (แก้เองภายหลังได้ที่หน้าสินค้า)`);
     }
