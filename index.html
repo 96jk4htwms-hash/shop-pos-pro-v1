@@ -2115,7 +2115,23 @@ async function pushTable(client, tableName, rows, onConflict, opts) {
     if (isNetworkErr && !opts._retried) {
       log('info', `${label}: การเชื่อมต่อขัดข้องชั่วคราว — ลองส่งใหม่อีกครั้ง...`);
       await new Promise(r => setTimeout(r, 1200));
-      return pushTable(client, tableName, rows, onConflict, { label, _retried: true });
+      return pushTable(client, tableName, rows, onConflict, { ...opts, label, _retried: true });
+    }
+    // ฐานข้อมูลบนคลาวด์ยังไม่มีคอลัมน์ที่แอปพยายามส่งไป (ยังไม่ได้รัน SQL patch ล่าสุดให้ตรงกับ
+    // index.html เวอร์ชันนี้) — PostgREST จะขึ้น code PGRST204 พร้อมชื่อคอลัมน์ที่หาไม่เจอ ถ้าปล่อยให้
+    // ตารางนี้พังทั้งชุด ตารางอื่นที่มี foreign key อ้างอิงถึง (เช่น product_variants/product_categories
+    // อ้างถึง products) จะพังตามเป็นทอดๆ ไปด้วยทั้งที่ไม่เกี่ยวข้องกับปัญหาจริง — ตัดเฉพาะคอลัมน์ที่หา
+    // ไม่เจอออกจากทุกแถวแล้วส่งใหม่อีกครั้ง (ทำซ้ำได้หลายรอบถ้าขาดหลายคอลัมน์ ครั้งละ 1 คอลัมน์ตามที่
+    // PostgREST รายงานมา) พร้อมเตือนชัดเจนว่าต้องรัน pos_schema.sql กับโปรเจกต์ Supabase
+    const missingColAttempts = opts._missingColAttempts || 0;
+    if (error.code === 'PGRST204' && missingColAttempts < 6) {
+      const m = (error.message || '').match(/Could not find the '([^']+)' column/);
+      if (m) {
+        const col = m[1];
+        const strippedRows = rows.map(r => { const rest = { ...r }; delete rest[col]; return rest; });
+        log('err', `${label}: ฐานข้อมูลบนคลาวด์ยังไม่มีคอลัมน์ "${col}" — ต้องรันไฟล์ pos_schema.sql เวอร์ชันล่าสุดกับโปรเจกต์ Supabase ก่อน ค่านี้จะยังไม่ถูกบันทึกขึ้นคลาวด์จนกว่าจะรัน SQL ให้ครบ (กำลังลองส่งส่วนที่เหลือโดยไม่มีคอลัมน์นี้ไปก่อน)`);
+        return pushTable(client, tableName, strippedRows, onConflict, { ...opts, label, _missingColAttempts: missingColAttempts + 1 });
+      }
     }
     log('err', `${label}: ${fmtErr(error)}`); return false;
   }
