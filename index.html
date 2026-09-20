@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <title>Smart POS Pro V2 — เขียนใหม่ทั้งหมด</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- ทำให้เพิ่มหน้าจอโฮมแล้วเปิดเหมือนแอปจริง (ไม่มีแถบที่อยู่เบราว์เซอร์, สีธีม, ไอคอน) -->
+<meta name="theme-color" content="#4f46e5">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Smart POS">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f46e5'/><text x='50' y='66' font-family='Arial,sans-serif' font-size='42' font-weight='800' fill='white' text-anchor='middle'>POS</text></svg>">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%234f46e5'/><text x='50' y='66' font-family='Arial,sans-serif' font-size='42' font-weight='800' fill='white' text-anchor='middle'>POS</text></svg>">
+<link rel="manifest" id="manifest-link">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -41,20 +50,58 @@
   /* ---- ตะกร้าแบบซ่อน/แสดงบนมือถือ (เหลือพื้นที่หน้าจอเลือกสินค้าเต็มๆ แล้วดึงตะกร้าขึ้นมาเมื่อจำเป็น) ---- */
   #mobile-cart-bar{display:none;position:fixed;left:12px;right:12px;bottom:12px;z-index:46;background:#4f46e5;color:#fff;border-radius:1rem;box-shadow:0 8px 20px rgba(79,70,229,.4);padding:.8rem 1.1rem;align-items:center;justify-content:space-between;font-weight:700;font-size:.82rem;cursor:pointer;}
   #cart-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:45;}
+
+  /* ---- แถบเมนูล่างแบบแอปจริง (มือถือเท่านั้น) + แผงเมนูเพิ่มเติม ---- */
+  #bottom-nav{display:none;}
+  #more-menu-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:57;}
+  #more-menu-sheet{display:none;position:fixed;left:0;right:0;bottom:0;z-index:58;background:#fff;border-radius:1.2rem 1.2rem 0 0;box-shadow:0 -8px 28px rgba(15,23,42,.28);padding:.6rem 1rem calc(1rem + env(safe-area-inset-bottom,0px));max-height:75vh;overflow-y:auto;}
+  .more-item{display:flex;align-items:center;gap:.7rem;padding:.8rem .3rem;font-weight:700;font-size:.86rem;border-bottom:1px solid #f1f5f9;cursor:pointer;}
+  .more-item .mi-icon{font-size:1.2rem;width:1.6rem;text-align:center;}
+
   @media (max-width: 767px) {
     #page-pos #cart-card{display:none;margin:0;}
     #page-pos #cart-card.cart-mobile-open{
-      display:block;position:fixed;left:0;right:0;bottom:0;z-index:47;
+      display:block;position:fixed;left:0;right:0;bottom:0;z-index:53;
       max-height:78vh;overflow-y:auto;border-radius:1.1rem 1.1rem 0 0;
       box-shadow:0 -8px 28px rgba(15,23,42,.28);
     }
-    #page-pos #mobile-cart-bar{display:flex;}
-    #page-pos #cart-backdrop.cart-mobile-open{display:block;}
+    #page-pos #mobile-cart-bar{display:flex;bottom:calc(64px + env(safe-area-inset-bottom,0px) + 10px);}
+    #page-pos #cart-backdrop.cart-mobile-open{display:block;z-index:52;}
+
+    #nav-tabs-wrap{display:none;}   /* ซ่อนแถบแท็บบนแบบเลื่อนแนวนอนของจอใหญ่ ใช้แถบล่างแทน */
+    #bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:44;background:#fff;
+      border-top:1px solid #e2e8f0;padding:.3rem .2rem calc(.3rem + env(safe-area-inset-bottom,0px));
+      justify-content:space-around;box-shadow:0 -2px 12px rgba(15,23,42,.07);}
+    .bn-item{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:.62rem;font-weight:700;
+      color:#94a3b8;flex:1;padding:.25rem 0;cursor:pointer;}
+    .bn-item.active{color:#4f46e5;}
+    .bn-icon{font-size:1.3rem;line-height:1;}
+    body{padding-bottom:70px!important;}   /* กันเนื้อหาโดนแถบเมนูล่างบัง (!important เพราะ Tailwind .pb-6 บน body มี specificity สูงกว่า) */
+    #page-pos{padding-bottom:0;}     /* หน้าขายมีระยะห่างของตัวเองจากแถบตะกร้าลอยอยู่แล้ว */
+
+    /* ปุ่ม/ช่องกรอกใหญ่ขึ้นแตะง่ายขึ้น และล็อกขนาดตัวอักษรช่องกรอกไว้ที่ 16px กัน iOS ซูมจอเองตอนแตะ */
+    input,select,textarea{font-size:16px;}
+    .btn{padding:.7rem 1rem;font-size:.85rem;}
+    .tab{padding:.65rem 1rem;font-size:.8rem;}
+    table{font-size:.74rem;}
   }
 </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen pb-6">
-
+<script>
+// ทำให้ "เพิ่มลงหน้าจอโฮม" ได้ไอคอน/สีธีม/เปิดแบบเต็มจอเหมือนแอปจริง (สร้าง manifest แบบไดนามิก
+// ไม่ต้องมีไฟล์ manifest.json แยกต่างหาก ใช้ไอคอนเดียวกับ favicon/apple-touch-icon ด้านบน)
+(function(){
+  try {
+    const icon = document.querySelector('link[rel="apple-touch-icon"]').href;
+    const manifest = { name: 'Smart POS Pro V2', short_name: 'POS', start_url: '.', display: 'standalone',
+      background_color: '#f8fafc', theme_color: '#4f46e5',
+      icons: [{ src: icon, sizes: '192x192', type: 'image/svg+xml', purpose: 'any' }, { src: icon, sizes: '512x512', type: 'image/svg+xml', purpose: 'any' }] };
+    const blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+    document.getElementById('manifest-link').setAttribute('href', URL.createObjectURL(blob));
+  } catch (e) { /* เบราว์เซอร์เก่าบางตัวไม่รองรับ Blob URL ของ manifest — ไม่กระทบการใช้งานหลักของแอป */ }
+})();
+</script>
 <!-- ============================================================================
      PIN LOGIN SCREEN
      ============================================================================ -->
@@ -95,20 +142,48 @@
     </div>
   </div>
   <div id="conn-status" class="text-xs font-bold mb-2 p-2 rounded-lg bg-slate-100 max-w-5xl mx-auto"></div>
-  <div class="flex gap-2 overflow-x-auto max-w-5xl mx-auto pb-1" id="nav-tabs">
-    <div class="tab tab-active" data-tab="pos" onclick="switchPage('pos')">🛒 ขาย</div>
-    <div class="tab tab-inactive" data-tab="products" onclick="switchPage('products')">📦 สินค้า</div>
-    <div class="tab tab-inactive" data-tab="customers" onclick="switchPage('customers')">👤 ลูกค้า</div>
-    <div class="tab tab-inactive" data-tab="suppliers" onclick="switchPage('suppliers')">🚚 ซัพพลายเออร์</div>
-    <div class="tab tab-inactive" data-tab="purchasing" onclick="switchPage('purchasing')">📋 จัดซื้อ</div>
-    <div class="tab tab-inactive" data-tab="returns" onclick="switchPage('returns')">↩️ คืนสินค้า</div>
-    <div class="tab tab-inactive" data-tab="employees" onclick="switchPage('employees')">👥 พนักงาน</div>
-    <div class="tab tab-inactive" data-tab="reports" onclick="switchPage('reports')">📊 รายงาน</div>
-    <div class="tab tab-inactive" data-tab="backup" onclick="switchPage('backup')">💾 สำรองข้อมูล</div>
-    <div class="tab tab-inactive" data-tab="dbadmin" onclick="switchPage('dbadmin')">🗄️ ฐานข้อมูล</div>
-    <div class="tab tab-inactive" data-tab="settings" onclick="switchPage('settings')">⚙️ ตั้งค่า</div>
-    <div class="tab tab-inactive" data-tab="log" onclick="switchPage('log')">🧾 Log</div>
+  <div id="nav-tabs-wrap">
+    <div class="flex gap-2 overflow-x-auto max-w-5xl mx-auto pb-1" id="nav-tabs">
+      <div class="tab tab-active" data-tab="pos" onclick="switchPage('pos')">🛒 ขาย</div>
+      <div class="tab tab-inactive" data-tab="products" onclick="switchPage('products')">📦 สินค้า</div>
+      <div class="tab tab-inactive" data-tab="customers" onclick="switchPage('customers')">👤 ลูกค้า</div>
+      <div class="tab tab-inactive" data-tab="suppliers" onclick="switchPage('suppliers')">🚚 ซัพพลายเออร์</div>
+      <div class="tab tab-inactive" data-tab="purchasing" onclick="switchPage('purchasing')">📋 จัดซื้อ</div>
+      <div class="tab tab-inactive" data-tab="returns" onclick="switchPage('returns')">↩️ คืนสินค้า</div>
+      <div class="tab tab-inactive" data-tab="employees" onclick="switchPage('employees')">👥 พนักงาน</div>
+      <div class="tab tab-inactive" data-tab="reports" onclick="switchPage('reports')">📊 รายงาน</div>
+      <div class="tab tab-inactive" data-tab="backup" onclick="switchPage('backup')">💾 สำรองข้อมูล</div>
+      <div class="tab tab-inactive" data-tab="dbadmin" onclick="switchPage('dbadmin')">🗄️ ฐานข้อมูล</div>
+      <div class="tab tab-inactive" data-tab="settings" onclick="switchPage('settings')">⚙️ ตั้งค่า</div>
+      <div class="tab tab-inactive" data-tab="log" onclick="switchPage('log')">🧾 Log</div>
+    </div>
   </div>
+</div>
+
+<!-- ============================================================================
+     แถบเมนูล่างแบบแอปจริง (แสดงเฉพาะจอมือถือ — ดู CSS #bottom-nav) + แผงเมนูเพิ่มเติม
+     ============================================================================ -->
+<div id="bottom-nav">
+  <div class="bn-item active" data-bn="pos" onclick="switchPage('pos')"><span class="bn-icon">🛒</span>ขาย</div>
+  <div class="bn-item" data-bn="products" onclick="switchPage('products')"><span class="bn-icon">📦</span>สินค้า</div>
+  <div class="bn-item" data-bn="reports" onclick="switchPage('reports')"><span class="bn-icon">📊</span>รายงาน</div>
+  <div class="bn-item" data-bn="customers" onclick="switchPage('customers')"><span class="bn-icon">👤</span>ลูกค้า</div>
+  <div class="bn-item" data-bn="more" onclick="openMoreMenu()"><span class="bn-icon">☰</span>เมนู</div>
+</div>
+<div id="more-menu-backdrop" onclick="closeMoreMenu()"></div>
+<div id="more-menu-sheet">
+  <div class="flex justify-between items-center mb-2 pt-1">
+    <h3 class="font-bold text-sm">เมนูทั้งหมด</h3>
+    <button class="text-slate-400 text-xl leading-none" onclick="closeMoreMenu()">✕</button>
+  </div>
+  <div class="more-item" onclick="switchPage('suppliers');closeMoreMenu()"><span class="mi-icon">🚚</span>ซัพพลายเออร์</div>
+  <div class="more-item" onclick="switchPage('purchasing');closeMoreMenu()"><span class="mi-icon">📋</span>จัดซื้อ</div>
+  <div class="more-item" onclick="switchPage('returns');closeMoreMenu()"><span class="mi-icon">↩️</span>คืนสินค้า</div>
+  <div class="more-item" onclick="switchPage('employees');closeMoreMenu()"><span class="mi-icon">👥</span>พนักงาน</div>
+  <div class="more-item" onclick="switchPage('backup');closeMoreMenu()"><span class="mi-icon">💾</span>สำรองข้อมูล</div>
+  <div class="more-item" onclick="switchPage('dbadmin');closeMoreMenu()"><span class="mi-icon">🗄️</span>ฐานข้อมูล</div>
+  <div class="more-item" onclick="switchPage('settings');closeMoreMenu()"><span class="mi-icon">⚙️</span>ตั้งค่า</div>
+  <div class="more-item" style="border-bottom:none;" onclick="switchPage('log');closeMoreMenu()"><span class="mi-icon">🧾</span>Log</div>
 </div>
 
 <div class="max-w-5xl mx-auto p-3">
@@ -122,7 +197,7 @@
       <input id="prod-search" placeholder="ค้นหาสินค้า / บาร์โค้ด..." oninput="renderProductGrid()" onkeydown="if(event.key==='Enter')trySearchBarcode()">
       <button class="btn btn-ghost" onclick="openScanner('pos')">📷</button>
     </div>
-    <div id="product-grid" class="grid grid-cols-3 gap-2 max-h-[60vh] overflow-y-auto pb-16 md:pb-0"></div>
+    <div id="product-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[60vh] overflow-y-auto pb-16 md:pb-0"></div>
   </div>
   <div id="cart-card" class="card">
     <div class="flex justify-between items-center mb-2">
@@ -428,6 +503,10 @@
   </div>
   <div id="import-images-preview" class="text-xs mb-2"></div>
   <button class="btn btn-primary w-full" onclick="startBulkImageImport()">🖼️ เริ่มนำเข้ารูป</button>
+
+  <h2 class="font-bold text-sm mb-2 pt-4 border-t text-rose-600">🧨 เริ่มต้นระบบใหม่ / ล้างข้อมูล</h2>
+  <p class="text-[10px] text-slate-500 mb-2">ใช้เมื่อต้องการล้างข้อมูลทดสอบทิ้งแล้วเริ่มขายจริง, ล้างข้อมูลร้านเดิมทั้งหมด, หรือย้ายไปใช้ฐานข้อมูล Supabase โปรเจกต์ใหม่ — ทุกทางเลือกด้านล่างย้อนกลับไม่ได้</p>
+  <button class="btn btn-danger w-full" onclick="openResetModal()">🧨 เปิดเมนูล้างข้อมูล / เริ่มระบบใหม่</button>
 </div>
 
 <!-- ============================================================================
@@ -653,6 +732,37 @@
   </div>
 </div>
 
+<div id="modal-reset" class="modal-bg hidden">
+  <div class="modal-box">
+    <h3 class="font-bold mb-2 text-rose-600">🧨 เริ่มต้นระบบใหม่ / ล้างข้อมูล</h3>
+    <p class="text-xs text-slate-500 mb-3">เลือกขอบเขตที่จะล้าง — การกระทำนี้ย้อนกลับไม่ได้ แนะนำให้ดาวน์โหลดไฟล์สำรองข้อมูล (หน้า 💾 สำรองข้อมูล) ก่อนเสมอ</p>
+    <div class="grid gap-2 mb-3">
+      <label class="flex items-start gap-2 text-xs p-2 rounded-lg border cursor-pointer">
+        <input type="radio" name="reset-scope" value="local" checked class="mt-1" style="width:auto">
+        <span><b>ล้างข้อมูลในเครื่องนี้เท่านั้น</b><br>ลบข้อมูลที่เก็บในเบราว์เซอร์นี้ (สินค้า/บิลที่ยังไม่ได้ซิงค์จะหายไปด้วย) แต่ไม่แตะข้อมูลบนคลาวด์ — เหมาะเมื่อจะดึงข้อมูลจากคลาวด์มาใหม่ทั้งหมด หรือล้างข้อมูลทดสอบในเครื่องนี้</span>
+      </label>
+      <label class="flex items-start gap-2 text-xs p-2 rounded-lg border cursor-pointer">
+        <input type="radio" name="reset-scope" value="cloud" class="mt-1" style="width:auto">
+        <span><b>ล้างข้อมูลบนคลาวด์ทั้งหมด (Supabase)</b><br>ลบสินค้า/หมวดหมู่/ลูกค้า/ซัพพลายเออร์/บิล/กะ/ใบสั่งซื้อ ฯลฯ ถาวรทุกเครื่องที่เชื่อมอยู่ (เฉพาะเจ้าของร้านทำได้ — พนักงานอื่นถูกลบออกจากระบบด้วย แต่บัญชีเจ้าของยังอยู่)</span>
+      </label>
+      <label class="flex items-start gap-2 text-xs p-2 rounded-lg border cursor-pointer">
+        <input type="radio" name="reset-scope" value="both" class="mt-1" style="width:auto">
+        <span><b>ล้างทั้งคลาวด์และเครื่องนี้</b><br>เหมาะสำหรับเริ่มต้นร้านใหม่จริงๆ ด้วยฐานข้อมูลเดิม</span>
+      </label>
+      <label class="flex items-start gap-2 text-xs p-2 rounded-lg border cursor-pointer">
+        <input type="radio" name="reset-scope" value="newdb" class="mt-1" style="width:auto">
+        <span><b>เชื่อมต่อฐานข้อมูลใหม่ทั้งหมด (โปรเจกต์ Supabase อื่น)</b><br>ล้างการตั้งค่าเชื่อมต่อ + ข้อมูลในเครื่องนี้ เพื่อกรอก URL/Key ของโปรเจกต์ใหม่ — ต้องไปรัน pos_schema.sql กับโปรเจกต์ใหม่เองก่อนใช้งาน</span>
+      </label>
+    </div>
+    <label class="flex items-center gap-2 text-xs mb-2"><input type="checkbox" id="reset-confirm-backup" style="width:auto"> ฉันสำรองข้อมูลที่สำคัญไว้แล้ว (หรือไม่ต้องการเก็บข้อมูลเดิมไว้)</label>
+    <input id="reset-confirm-text" placeholder='พิมพ์คำว่า "ลบทั้งหมด" เพื่อยืนยัน'>
+    <div class="flex gap-2 mt-3">
+      <button class="btn btn-danger flex-1" id="btn-perform-reset" onclick="performReset()">⚠️ ยืนยันดำเนินการ</button>
+      <button class="btn btn-ghost flex-1" onclick="closeModal('modal-reset')">ยกเลิก</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ============================================================================
 // 1. LOCAL DB
@@ -771,12 +881,20 @@ function closeModal(id){ document.getElementById(id).classList.add('hidden'); }
 // 4. PAGE NAVIGATION
 // ============================================================================
 const PAGES = ['pos','products','customers','suppliers','purchasing','returns','employees','reports','backup','dbadmin','settings','log'];
+const BOTTOM_NAV_PRIMARY = ['pos','products','reports','customers'];
 function switchPage(name) {
   PAGES.forEach(p => {
     document.getElementById('page-'+p).classList.toggle('hidden', p !== name);
     const tabEl = document.querySelector(`.tab[data-tab="${p}"]`);
     if (tabEl) tabEl.className = 'tab ' + (p === name ? 'tab-active' : 'tab-inactive');
   });
+  // อัปเดตแถบเมนูล่างของมือถือให้ตรงกับหน้าปัจจุบันด้วย — ถ้าหน้าที่เปิดไม่ใช่ 4 แท็บหลักที่โผล่ตรงๆ
+  // ในแถบล่าง (อยู่ในเมนู "☰ เมนู" แทน) ให้ไฮไลต์ปุ่ม "เมนู" ค้างไว้แทนเพื่อบอกว่ากำลังอยู่ในหน้าไหน
+  document.querySelectorAll('.bn-item').forEach(el => {
+    const tab = el.dataset.bn;
+    el.classList.toggle('active', tab === name || (tab === 'more' && !BOTTOM_NAV_PRIMARY.includes(name)));
+  });
+  closeMoreMenu();
   if (name === 'reports') renderReports();
   if (name === 'purchasing') populateAdjustVariants();
   if (name === 'settings') { document.getElementById('cfg-url').value = localStorage.getItem('pos2_url')||''; document.getElementById('cfg-key').value = localStorage.getItem('pos2_key')||''; refreshAuthStatus(); loadProtectionSettingsUI(); }
@@ -784,6 +902,8 @@ function switchPage(name) {
   if (name === 'backup') { renderBackupPageStatus(); }
   if (name !== 'pos') closeMobileCart();
 }
+function openMoreMenu() { document.getElementById('more-menu-sheet').style.display = 'block'; document.getElementById('more-menu-backdrop').style.display = 'block'; }
+function closeMoreMenu() { document.getElementById('more-menu-sheet').style.display = 'none'; document.getElementById('more-menu-backdrop').style.display = 'none'; }
 
 // ============================================================================
 // 4b. ระบบป้องกันการขาย/สต็อก (ตั้งค่าที่หน้า ⚙️ ตั้งค่า)
@@ -2101,6 +2221,63 @@ function importBackup() {
 }
 
 // ============================================================================
+// 18b. เริ่มต้นระบบใหม่ / ล้างข้อมูล (ในเครื่อง, บนคลาวด์, หรือย้ายไปโปรเจกต์ Supabase ใหม่)
+// ----------------------------------------------------------------------------
+// ฝั่งคลาวด์เรียก RPC factory_reset_cloud_data() ที่นิยามไว้ใน pos_schema.sql (จำกัดสิทธิ์ไว้ที่
+// is_owner() แล้วในตัวฟังก์ชันเอง ฝั่งนี้แค่เรียกใช้ ไม่ได้ตรวจสิทธิ์ซ้ำเอง) TRUNCATE ตารางธุรกิจ
+// ทั้งหมดแบบ CASCADE แต่ "จงใจ" ไม่ลบแถว app_users ของเจ้าของร้านที่กำลังเรียกอยู่ กันล็อกตัวเองออก
+// ============================================================================
+function openResetModal() {
+  document.querySelector('input[name="reset-scope"][value="local"]').checked = true;
+  document.getElementById('reset-confirm-backup').checked = false;
+  document.getElementById('reset-confirm-text').value = '';
+  document.getElementById('modal-reset').classList.remove('hidden');
+}
+async function performReset() {
+  const scope = document.querySelector('input[name="reset-scope"]:checked').value;
+  if (!document.getElementById('reset-confirm-backup').checked) return log('err', 'กรุณาติ๊กยืนยันว่าสำรองข้อมูลไว้แล้ว (หรือไม่ต้องการเก็บข้อมูลเดิม) ก่อนดำเนินการ');
+  if (document.getElementById('reset-confirm-text').value.trim() !== 'ลบทั้งหมด') return log('err', 'พิมพ์คำว่า "ลบทั้งหมด" ให้ตรงทุกตัวอักษรเพื่อยืนยัน');
+
+  const btn = document.getElementById('btn-perform-reset');
+  btn.disabled = true; btn.textContent = '⏳ กำลังดำเนินการ...';
+  try {
+    if (scope === 'cloud' || scope === 'both') {
+      const client = getClient();
+      if (!client) { log('err', 'ยังไม่ได้เชื่อมต่อ Supabase — ล้างข้อมูลบนคลาวด์ไม่ได้'); return; }
+      const { data: { session } } = await client.auth.getSession();
+      if (!session?.user) { log('err', 'ยังไม่ได้เข้าสู่ระบบร้านค้า — ล้างข้อมูลบนคลาวด์ไม่ได้'); return; }
+      const { error } = await client.rpc('factory_reset_cloud_data');
+      if (error) { log('err', 'ล้างข้อมูลบนคลาวด์ไม่สำเร็จ: ' + fmtErr(error)); return; }
+      log('ok', '✅ ล้างข้อมูลบนคลาวด์สำเร็จ');
+    }
+    if (scope === 'local' || scope === 'both') {
+      closeModal('modal-reset');
+      localStorage.removeItem('pos2_db');
+      log('ok', '✅ ล้างข้อมูลในเครื่องนี้สำเร็จ — กำลังโหลดหน้าใหม่...');
+      setTimeout(() => location.reload(), 900);
+      return;
+    }
+    if (scope === 'newdb') {
+      closeModal('modal-reset');
+      localStorage.removeItem('pos2_db');
+      localStorage.removeItem('pos2_url');
+      localStorage.removeItem('pos2_key');
+      log('ok', '✅ ล้างการเชื่อมต่อและข้อมูลในเครื่องนี้แล้ว — หลังโหลดหน้าใหม่ ไปที่แท็บ ⚙️ ตั้งค่า กรอก URL/Key ของโปรเจกต์ Supabase ใหม่ (อย่าลืมรัน pos_schema.sql กับโปรเจกต์ใหม่ก่อนใช้งาน)');
+      setTimeout(() => location.reload(), 1200);
+      return;
+    }
+    if (scope === 'cloud') {
+      // ล้างคลาวด์อย่างเดียว (ไม่แตะเครื่องนี้) — ดึงข้อมูลที่ว่างเปล่าแล้วกลับมาให้ทันที ไม่งั้นหน้าจอ
+      // จะยังโชว์สินค้า/ลูกค้าชุดเก่าที่ถูกลบไปแล้วบนคลาวด์ค้างอยู่ จนกว่าจะกดซิงค์เองอีกที
+      closeModal('modal-reset');
+      await pullFromSupabase();
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = '⚠️ ยืนยันดำเนินการ';
+  }
+}
+
+// ============================================================================
 // 19. SYNC ENGINE (push/pull ทุกตาราง — log แจ้งสาเหตุจริงครบทุกครั้ง)
 // ============================================================================
 async function pushTable(client, tableName, rows, onConflict, opts) {
@@ -2530,6 +2707,12 @@ async function dbaSubmitInsertJson() {
 renderAll(); renderProductGrid(); renderCart(); renderShiftBadge(); renderHeldList(); updateActiveUserBadge(); refreshConn();
 updatePendingSyncBadge();
 if (navigator.onLine) retryUnsyncedBills(true);
+// ลงทะเบียน service worker ถ้ามีไฟล์ sw.js วางอยู่ข้างๆ index.html นี้ (ทำให้เปิดแอปได้ทันทีแม้เน็ต
+// หลุด/ช้า และหน้าจอ "เพิ่มไปยังโฮมสกรีน" ทำงานสมบูรณ์แบบแอปจริงมากขึ้น) — ถ้าไม่มีไฟล์นี้ก็แค่เงียบๆ
+// ไป ไม่กระทบการทำงานหลักของแอปเลย เพราะแอปนี้ทำงานผ่าน localStorage ของตัวเองอยู่แล้วเป็นหลัก
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
 // หน้าจอล็อก PIN ขึ้นเฉพาะตอนมีพนักงานที่ตั้ง PIN ไว้แล้วอย่างน้อย 1 คนเท่านั้น — เครื่องที่เพิ่งติดตั้ง
 // ใหม่ (ยังไม่มีใครตั้ง PIN เลย) ต้องเข้าถึงแท็บตั้งค่าได้เสมอ ไม่งั้นจะสมัคร/ตั้งค่าเจ้าของร้านไม่ได้เลย
 if (!db.activeUser && db.users.some(u => u.pinHash)) renderPinLoginScreen();
