@@ -27,6 +27,10 @@
   .btn-emerald{background:#059669;color:#fff;} .btn-danger{background:#fee2e2;color:#b91c1c;}
   .btn-amber{background:#fef3c7;color:#92400e;}
   input,select{border:1px solid #cbd5e1;border-radius:.5rem;padding:.4rem .6rem;font-size:.8rem;width:100%;}
+  /* บั๊กสำคัญ: กฎด้านบน (width:100%) ใช้กับ <input> ทุกชนิดรวมถึง checkbox/radio ด้วย ทำให้ช่องติ๊ก
+     ยืดเต็มความกว้างแถว/เซลล์ตาราง (บนตารางเห็นเป็นจุดเล็กๆ ผิดรูป, ในแถวข้อความจะไปเบียดให้ตัวหนังสือ
+     เหลือพื้นที่แคบมากจนตัวอักษรตัดบรรทัดถี่ยิบเป็นแนวตั้ง) ต้องคืนขนาดที่แท้จริงให้ชนิดนี้เป็นพิเศษ */
+  input[type="checkbox"],input[type="radio"]{width:19px;height:19px;flex:none;accent-color:#4f46e5;cursor:pointer;}
   table{width:100%;font-size:.78rem;border-collapse:collapse;}
   th{text-align:left;color:#64748b;font-weight:700;padding:.4rem;border-bottom:2px solid #e2e8f0;}
   td{padding:.4rem;border-bottom:1px solid #f1f5f9;}
