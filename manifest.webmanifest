@@ -1,0 +1,25 @@
+{
+  "id": "./index.html",
+  "name": "Smart POS Pro",
+  "short_name": "Smart POS",
+  "description": "ระบบขายหน้าร้าน POS ใช้งานได้แม้ออฟไลน์",
+  "lang": "th",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#4f46e5",
+  "theme_color": "#4f46e5",
+  "categories": ["business", "shopping"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "ขายสินค้า", "short_name": "ขาย", "url": "./index.html?page=pos", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "สินค้า", "url": "./index.html?page=products", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "รายงานยอดขาย", "short_name": "รายงาน", "url": "./index.html?page=reports", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
