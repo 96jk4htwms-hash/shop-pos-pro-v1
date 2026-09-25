@@ -990,10 +990,12 @@ create unique index idx_product_variants_sku on product_variants(sku) where sku 
 
 
 -- ============================================================================
--- 21. V3 PATCH — ระบบลบข้อมูล / ประวัติการใช้งาน (audit) / ป้องกันการแก้สิทธิ์พนักงานฝั่งเซิร์ฟเวอร์
+-- 21b. V3 PATCH — ระบบลบข้อมูล / ประวัติการใช้งาน (audit) / ป้องกันการแก้สิทธิ์พนักงานฝั่งเซิร์ฟเวอร์
 -- ----------------------------------------------------------------------------
 -- รันซ้ำได้ปลอดภัย (idempotent) — วางต่อท้าย pos_schema.sql เดิมแล้วรันทั้งไฟล์ หรือรันเฉพาะไฟล์นี้กับฐานข้อมูลที่ติดตั้งไว้แล้วก็ได้
 -- ต้องรันก่อนใช้งานแอป pos-app-v3.html: ปุ่มลบ/รวมสินค้าซ้ำ และหน้า "ประวัติการใช้งาน (คลาวด์)" ต้องอาศัยของในไฟล์นี้
+-- (เดิมหัวข้อนี้ใช้เลข "21." ซ้ำกับ PATCH ก่อนหน้า — เปลี่ยนเป็น "21b." ตามธรรมเนียมของไฟล์นี้เอง
+-- ที่เคยใช้ "14b." มาก่อนแล้ว กันสับสนเวลาอ้างอิงเลขหัวข้อ)
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -1259,3 +1261,277 @@ begin
           'ล้างข้อมูลทั้งหมดบนคลาวด์ (คงไว้เฉพาะบัญชีเจ้าของร้านและประวัติการใช้งาน)', null, 'server');
 end;
 $$;
+
+
+-- ============================================================================
+-- 22. COMPAT PATCH — เชื่อมไฟล์นี้ (v3) เข้ากับแอป index.html (Smart POS Pro V2) ที่ใช้งานอยู่จริง
+-- ----------------------------------------------------------------------------
+-- พบตอนตรวจโค้ด: ไฟล์ v3 นี้ถูกออกแบบคู่กับ "pos-app-v3.html" (ระบุไว้ในคอมเมนต์หัวข้อ 21) ซึ่ง
+-- เป็นคนละไฟล์กับ index.html ที่ใช้งานจริงอยู่ตอนนี้ ทำให้มี 2 จุดที่ "ไม่ตรงกัน" และจะทำให้แอปพัง/
+-- ข้อมูลหายเงียบๆ ถ้ารันไฟล์นี้ทับโดยไม่แพตช์ก่อน:
+--
+--   1) create_sale(...) ในไฟล์นี้ไม่มีพารามิเตอร์ p_allow_negative — แต่ index.html เรียก RPC นี้
+--      พร้อมส่ง p_allow_negative เสมอทุกครั้งที่กดชำระเงิน (มาจากสวิตช์ "ป้องกันสต็อกติดลบ" ในหน้า
+--      ตั้งค่า) พารามิเตอร์ไม่ตรง signature ทำให้ PostgREST หาฟังก์ชันไม่เจอ (PGRST202) → "ขายของ
+--      ไม่ได้เลยสักบิลเดียว" ทันทีที่ต่อเน็ต นี่คือบั๊กร้ายแรงที่สุดที่ต้องแก้ก่อนใช้งานจริง
+--   2) คอลัมน์ products.group_name / products.display_order (ใช้กับฟีเจอร์ "จัดกลุ่มสินค้า" และ
+--      "เรียงลำดับสินค้าที่กำหนดเอง" ในหน้าสินค้าของ index.html) ไม่มีอยู่ในไฟล์นี้เลย — จะซิงค์ไม่ขึ้น
+--      คลาวด์ (แอปจะข้ามคอลัมน์นี้ให้อัตโนมัติแบบเงียบๆ ไม่ error แต่ข้อมูลจะไม่ sync ข้ามเครื่อง)
+--
+-- แพตช์นี้วางต่อท้ายให้ปลอดภัย รันซ้ำได้ (idempotent) เหมือนทุกส่วนของไฟล์นี้
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- 22.1  คืนคอลัมน์ group_name / display_order ให้ตาราง products
+-- ----------------------------------------------------------------------------
+alter table products add column if not exists group_name    text;
+alter table products add column if not exists display_order integer default 0;
+create index if not exists idx_products_group on products(group_name);
+
+-- ----------------------------------------------------------------------------
+-- 22.2  create_sale(...) — เพิ่ม p_allow_negative กลับเข้าไป (ตรรกะอื่นเหมือนเดิมทุกจุดจากข้อ 21)
+--       p_allow_negative default false (ห้ามติดลบเสมอถ้าไม่ระบุ) — ยังคงล็อกแถว (for update) และหัก
+--       สต็อกแบบอะตอมมิกทุกกรณีเหมือนเดิม แค่ "ข้าม" การเช็คไม่ให้ติดลบเมื่อผู้ใช้ตั้งใจปิดไว้เอง
+--
+--       หมายเหตุ: การเพิ่มพารามิเตอร์ทำให้ signature เปลี่ยน "create or replace" จะไม่ทับฟังก์ชันเดิม
+--       (8 พารามิเตอร์) แต่จะสร้างฟังก์ชันใหม่ซ้อนขึ้นมาแทน (function overloading ปกติของ Postgres)
+--       ต้อง drop ตัวเดิมทิ้งอย่างชัดเจนก่อน กันมีฟังก์ชันซ้ำค้างเป็นขยะไว้ในฐานข้อมูล
+-- ----------------------------------------------------------------------------
+drop function if exists create_sale(text, uuid, uuid, uuid, numeric, numeric, text, jsonb);
+create or replace function create_sale(
+  p_bill_number     text,
+  p_customer_id     uuid,
+  p_user_id         uuid,
+  p_shift_id        uuid,
+  p_discount_amount numeric,
+  p_tax_amount      numeric,
+  p_payment_method  text,
+  p_items           jsonb,
+  p_allow_negative  boolean default false
+) returns jsonb
+language plpgsql security definer as $$
+declare
+  v_bill_id   uuid := gen_random_uuid();
+  v_subtotal  numeric := 0;
+  v_total     numeric;
+  v_item      jsonb;
+  v_variant   product_variants%rowtype;
+  v_ratio     numeric;
+  v_deduct    numeric;
+  v_customer  customers%rowtype;
+begin
+  if not is_staff() then
+    raise exception 'ไม่มีสิทธิ์บันทึกการขาย';
+  end if;
+
+  for v_item in select * from jsonb_array_elements(p_items)
+  loop
+    v_subtotal := v_subtotal + ((v_item->>'quantity')::numeric * (v_item->>'unit_price')::numeric);
+  end loop;
+  v_total := v_subtotal - coalesce(p_discount_amount, 0) + coalesce(p_tax_amount, 0);
+
+  if upper(coalesce(p_payment_method,'CASH')) = 'CREDIT' and p_customer_id is not null then
+    select * into v_customer from customers where id = p_customer_id for update;
+    if found and (v_customer.debt + v_total) > v_customer.credit_limit then
+      raise exception 'ยอดหนี้รวมจะเกินวงเงินเครดิตที่กำหนดไว้ (วงเงิน % หนี้เดิม % ยอดนี้ %)',
+        v_customer.credit_limit, v_customer.debt, v_total;
+    end if;
+    if found then
+      update customers set debt = debt + v_total where id = p_customer_id;
+    end if;
+  end if;
+
+  insert into bills (id, bill_number, customer_id, user_id, shift_id, subtotal,
+                      discount_amount, tax_amount, total, payment_method, status)
+  values (v_bill_id, p_bill_number, p_customer_id, p_user_id, p_shift_id, v_subtotal,
+          coalesce(p_discount_amount,0), coalesce(p_tax_amount,0), v_total,
+          coalesce(p_payment_method,'CASH'), 'PAID');
+
+  for v_item in select * from jsonb_array_elements(p_items)
+  loop
+    insert into bill_items (id, bill_id, product_id, variant_id, fraction_id,
+                             item_name, quantity, unit_price, line_total)
+    values (
+      gen_random_uuid(), v_bill_id,
+      nullif(v_item->>'product_id','')::uuid,
+      nullif(v_item->>'variant_id','')::uuid,
+      nullif(v_item->>'fraction_id','')::uuid,
+      v_item->>'item_name',
+      (v_item->>'quantity')::numeric,
+      (v_item->>'unit_price')::numeric,
+      (v_item->>'quantity')::numeric * (v_item->>'unit_price')::numeric
+    );
+
+    if nullif(v_item->>'variant_id','') is not null then
+      select * into v_variant from product_variants
+        where id = (v_item->>'variant_id')::uuid for update;
+
+      if nullif(v_item->>'fraction_id','') is not null then
+        select quantity_ratio into v_ratio from product_fractions
+          where id = (v_item->>'fraction_id')::uuid;
+        v_deduct := (v_item->>'quantity')::numeric / coalesce(v_ratio, 1);
+      else
+        v_deduct := (v_item->>'quantity')::numeric;
+      end if;
+
+      if found and not p_allow_negative and v_variant.stock_quantity - v_deduct < 0 then
+        raise exception 'สินค้า "%" คงเหลือไม่พอ (คงเหลือ % ต้องการหัก %)',
+          v_item->>'item_name', v_variant.stock_quantity, v_deduct;
+      end if;
+
+      update product_variants set stock_quantity = stock_quantity - v_deduct
+        where id = v_variant.id;
+
+      insert into inventory_movements (variant_id, change_qty, reason, ref_type, ref_id)
+      values (v_variant.id, -v_deduct, 'SALE', 'bill', v_bill_id);
+    end if;
+  end loop;
+
+  return jsonb_build_object('bill_id', v_bill_id);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 22.3  เสริมความรัดกุมให้ delete_entity() — กันเคส v_me หาไม่เจอ (ทฤษฎีล้วนๆ แทบเกิดไม่ได้จริง แต่
+-- ถ้าเกิดขึ้น จะทำให้เงื่อนไข "v_me.role <> 'OWNER'" กลายเป็น NULL แทนที่จะเป็น true/false ซึ่งใน
+-- plpgsql, "if NULL then...end if" จะถือว่าไม่เข้าเงื่อนไข (เหมือน false) — เท่ากับข้ามการเช็คสิทธิ์
+-- "ผู้จัดการลบได้เฉพาะบัญชีแคชเชียร์" ไปเงียบๆ) เพิ่ม guard explicit ไว้กันไว้ก่อนเผื่อกรณีบัญชีถูก
+-- ปิดใช้งานพอดีจังหวะเดียวกับที่เรียก RPC นี้ (race condition ที่แทบไม่เกิด แต่ถ้าเกิดต้องปฏิเสธไปเลย
+-- ไม่ใช่ปล่อยผ่านแบบไม่ตั้งใจ)
+-- ----------------------------------------------------------------------------
+create or replace function delete_entity(p_kind text, p_id uuid, p_note text default null)
+returns jsonb
+language plpgsql security definer as $$
+declare
+  v_mode      text := 'deleted';
+  v_has_hist  boolean;
+  v_row       record;
+  v_me        app_users%rowtype;
+  v_tag       text := '#arch-' || left(p_id::text, 8);
+begin
+  if not is_staff() then
+    raise exception 'ต้องเข้าสู่ระบบเป็นพนักงานก่อน';
+  end if;
+  select * into v_me from app_users where auth_user_id = auth.uid() and is_active limit 1;
+  if v_me.id is null then
+    raise exception 'ไม่พบบัญชีพนักงานที่ใช้งานอยู่ — กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่';
+  end if;
+
+  if p_kind in ('product','variant','fraction','category') then
+    if not has_perm('products.delete') then raise exception 'ไม่มีสิทธิ์ลบสินค้า/หมวดหมู่ (products.delete)'; end if;
+  elsif p_kind = 'customer' then
+    if not has_perm('customers.delete') then raise exception 'ไม่มีสิทธิ์ลบลูกค้า (customers.delete)'; end if;
+  elsif p_kind in ('supplier','purchase_order') then
+    if not has_perm('suppliers.manage') then raise exception 'ไม่มีสิทธิ์จัดการซัพพลายเออร์/ใบสั่งซื้อ (suppliers.manage)'; end if;
+  elsif p_kind = 'employee' then
+    if not has_perm('employees.manage') then raise exception 'ไม่มีสิทธิ์จัดการพนักงาน (employees.manage)'; end if;
+  else
+    raise exception 'ไม่รู้จักชนิดข้อมูลที่จะลบ: %', p_kind;
+  end if;
+
+  if p_kind = 'product' then
+    if not exists (select 1 from products where id = p_id) then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    v_has_hist :=
+         exists (select 1 from bill_items where product_id = p_id)
+      or exists (select 1 from purchase_order_items where product_id = p_id)
+      or exists (select 1 from inventory_movements m join product_variants v on v.id = m.variant_id where v.product_id = p_id);
+    if v_has_hist then
+      update products set is_active = false,
+             sku = case when sku is null then null when sku like '%#arch-%' then sku else sku || v_tag end
+       where id = p_id;
+      update product_variants set is_active = false, barcode = null,
+             sku = case when sku is null then null when sku like '%#arch-%' then sku else sku || '#arch-' || left(id::text, 8) end
+       where product_id = p_id;
+      update product_fractions set is_active = false where variant_id in (select id from product_variants where product_id = p_id);
+      v_mode := 'archived';
+    else
+      delete from products where id = p_id;
+    end if;
+
+  elsif p_kind = 'variant' then
+    if not exists (select 1 from product_variants where id = p_id) then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    v_has_hist :=
+         exists (select 1 from bill_items where variant_id = p_id)
+      or exists (select 1 from purchase_order_items where variant_id = p_id)
+      or exists (select 1 from inventory_movements where variant_id = p_id);
+    if v_has_hist then
+      update product_variants set is_active = false, barcode = null,
+             sku = case when sku is null then null when sku like '%#arch-%' then sku else sku || v_tag end
+       where id = p_id;
+      update product_fractions set is_active = false where variant_id = p_id;
+      v_mode := 'archived';
+    else
+      delete from product_variants where id = p_id;
+    end if;
+
+  elsif p_kind = 'fraction' then
+    if not exists (select 1 from product_fractions where id = p_id) then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    if exists (select 1 from bill_items where fraction_id = p_id) then
+      update product_fractions set is_active = false where id = p_id;
+      v_mode := 'archived';
+    else
+      delete from product_fractions where id = p_id;
+    end if;
+
+  elsif p_kind = 'category' then
+    if not exists (select 1 from categories where id = p_id) then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    delete from categories where id = p_id;
+
+  elsif p_kind = 'customer' then
+    select * into v_row from customers where id = p_id;
+    if not found then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    if coalesce(v_row.debt, 0) > 0 then raise exception 'ลูกค้า "%" ยังมีหนี้ค้าง % บาท — ต้องรับชำระให้หมดก่อนถึงจะลบได้', v_row.name, v_row.debt; end if;
+    if exists (select 1 from bills where customer_id = p_id) then
+      update customers set is_active = false where id = p_id; v_mode := 'archived';
+    else
+      delete from customers where id = p_id;
+    end if;
+
+  elsif p_kind = 'supplier' then
+    if not exists (select 1 from suppliers where id = p_id) then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    if exists (select 1 from purchase_orders where supplier_id = p_id) or exists (select 1 from accounts_payable where supplier_id = p_id) then
+      update suppliers set is_active = false where id = p_id; v_mode := 'archived';
+    else
+      delete from suppliers where id = p_id;
+    end if;
+
+  elsif p_kind = 'purchase_order' then
+    select * into v_row from purchase_orders where id = p_id;
+    if not found then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    if v_row.status = 'RECEIVED' or exists (select 1 from purchase_order_items where purchase_order_id = p_id and coalesce(received_quantity, 0) > 0) then
+      raise exception 'ใบสั่งซื้อ % รับสินค้าเข้าคลังแล้ว ลบไม่ได้ (มีประวัติสต็อกผูกอยู่)', v_row.po_number;
+    end if;
+    delete from purchase_orders where id = p_id;
+
+  elsif p_kind = 'employee' then
+    select * into v_row from app_users where id = p_id;
+    if not found then return jsonb_build_object('mode','missing','kind',p_kind); end if;
+    if v_row.role = 'OWNER' then raise exception 'ลบเจ้าของร้านไม่ได้'; end if;
+    if v_row.id = v_me.id then raise exception 'ลบบัญชีของตัวเองไม่ได้'; end if;
+    if v_me.role <> 'OWNER' and v_row.role <> 'CASHIER' then raise exception 'ผู้จัดการลบได้เฉพาะบัญชีแคชเชียร์'; end if;
+    if exists (select 1 from bills where user_id = p_id) or exists (select 1 from shifts where opened_by = p_id or closed_by = p_id) then
+      update app_users set is_active = false where id = p_id; v_mode := 'archived';
+    else
+      delete from app_users where id = p_id;
+    end if;
+  end if;
+
+  insert into audit_logs (id, actor_app_user_id, actor_name, actor_role, action, entity, entity_id, detail, meta, device_id)
+  values (gen_random_uuid(), v_me.id, v_me.name, v_me.role, 'SERVER_DELETE', p_kind, p_id::text,
+          coalesce(p_note, '') || ' → ' || case v_mode when 'archived' then 'เก็บเข้าประวัติ' else 'ลบถาวร' end,
+          jsonb_build_object('mode', v_mode), 'server');
+
+  return jsonb_build_object('mode', v_mode, 'kind', p_kind);
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- 22.4  ปิดช่องโหว่เล็กๆ: staff_insert_audit_logs เดิมให้ "พนักงานทุกคน" (is_staff, รวม CASHIER)
+-- insert แถวลง audit_logs ได้ตรงๆ ผ่าน REST API/dbadmin — ทั้งที่การเขียนจริงทั้งหมดในระบบทำผ่าน RPC
+-- ที่เป็น security definer (bypass RLS อยู่แล้ว) ไม่เคยต้องพึ่ง policy นี้เลย เท่ากับ policy นี้เปิดช่อง
+-- ให้พนักงานที่ไม่ประสงค์ดีปลอมแถวประวัติปลอมผ่านหน้า "🗄️ ฐานข้อมูล" ได้เฉยๆ (แก้/ลบแถวจริงไม่ได้อยู่แล้ว
+-- เพราะ immutable trigger กันไว้ แต่ "เพิ่มแถวปลอมแทรก" ยังทำได้) — จำกัดให้เหลือแค่ manager ขึ้นไป
+-- ----------------------------------------------------------------------------
+drop policy if exists "staff_insert_audit_logs" on audit_logs;
+drop policy if exists "manager_insert_audit_logs" on audit_logs;
+create policy "manager_insert_audit_logs" on audit_logs for insert with check (is_manager());
